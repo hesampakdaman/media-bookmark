@@ -198,9 +198,9 @@ one returned by `media-bookmark-backend-players'."
 ;; `media-bookmark-session-file' (a file name, or a URL if
 ;; `media-bookmark-url-p') and keeps its own state, such as the
 ;; player process, in `media-bookmark-session-data'.  It reports
-;; what the player does with `media-bookmark-update' and
-;; `media-bookmark-stopped'; the core takes care of buffers and
-;; bookmarks.
+;; what the player does with `media-bookmark-update',
+;; `media-bookmark-switched' and `media-bookmark-stopped'; the core
+;; takes care of buffers and bookmarks.
 ;;
 ;; Register the backend in `media-bookmark-backends' so that users
 ;; can choose it with `media-bookmark-backend'.
@@ -299,6 +299,36 @@ PROPS is a plist with any of :time, :duration and :title, and
       (setf (media-bookmark-session-paused session) paused)
       (when paused
         (media-bookmark--update-bookmark session))
+      (media-bookmark--redisplay session))))
+
+(defun media-bookmark-switched (session file &optional finished)
+  "Record that SESSION's player has moved on to FILE, a file name or URL.
+Backends call this when the player plays other media, as in a
+playlist.  FINISHED non-nil means the previous media played to the
+end.  The previous media's bookmark is updated, and if FILE has a
+media bookmark, it becomes SESSION's and playback resumes from it."
+  (let ((file (media-bookmark--normalize file))
+        (buffer (media-bookmark-session-buffer session)))
+    (unless (equal file (media-bookmark-session-file session))
+      (when (and finished media-bookmark-rewind-when-finished)
+        (setf (media-bookmark-session-time session) 0))
+      (media-bookmark--update-bookmark session)
+      (setf (media-bookmark-session-file session) file
+            (media-bookmark-session-title session) nil
+            (media-bookmark-session-duration session) nil
+            (media-bookmark-session-time session) 0)
+      (let* ((bookmark (media-bookmark--find-bookmark file))
+             (time (and bookmark (bookmark-prop-get bookmark 'media-time))))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (setq bookmark-current-bookmark
+                  (and bookmark (bookmark-name-from-full-record bookmark)))
+            (rename-buffer (format "*media: %s*" (media-bookmark--name session))
+                           t)))
+        (when (and time (> time 0))
+          (setf (media-bookmark-session-time session) time)
+          (media-bookmark-backend-seek (media-bookmark-session-backend session)
+                                       session time)))
       (media-bookmark--redisplay session))))
 
 (defvar media-bookmark--killing nil

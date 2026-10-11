@@ -87,6 +87,11 @@ In the session buffer, which shows the player's state:
 You can as well use mpv's own keys in its window: pausing, seeking or
 quitting there is followed the same way.
 
+When mpv moves on to other media, as in a playlist or a directory, the
+session follows: the bookmark of the media it leaves is updated, and if
+the new media has a bookmark, it becomes the session's and playback
+resumes from it.
+
 When the player quits, its session buffer closes; other sessions are
 left alone.  Set =media-bookmark-kill-buffer-when-stopped= to nil to
 keep it, so that you can seek and press =SPC= to play again.  Killing
@@ -198,6 +203,11 @@ The backend reports what the player does:
   with any of the properties, whenever they change.  Report =:time= as
   it changes (or poll it), since some players, like mpv, are gone
   before they can be asked for the final position.
+- =(media-bookmark-switched session FILE FINISHED)= when the player
+  moves on to other media, as in a playlist, with FINISHED non-nil if
+  the previous media played to the end.  The core may then seek, to
+  resume FILE from its bookmark; a backend whose player cannot seek
+  yet should hold the seek until it can, as the mpv backend does.
 - =(media-bookmark-stopped session FINISHED)= when the player exits,
   with FINISHED non-nil if it played to the end.
 
