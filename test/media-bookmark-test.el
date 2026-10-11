@@ -547,7 +547,8 @@
   "Start an mpv outside media-bookmark on FILE, with IPC at SOCKET."
   (let ((process (start-process "external-mpv" nil "mpv" "--no-config"
                                 "--ao=null" "--vo=null"
-                                (concat "--input-ipc-server=" socket) file)))
+                                (concat "--input-ipc-server=" socket)
+                                (expand-file-name file))))
     (set-process-query-on-exit-flag process nil)
     (media-bookmark-test--wait (lambda () (file-exists-p socket)))
     process))
