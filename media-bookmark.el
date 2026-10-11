@@ -199,8 +199,10 @@ one returned by `media-bookmark-backend-players'."
 ;; `media-bookmark-url-p') and keeps its own state, such as the
 ;; player process, in `media-bookmark-session-data'.  It reports
 ;; what the player does with `media-bookmark-update',
-;; `media-bookmark-switched' and `media-bookmark-stopped'; the core
-;; takes care of buffers and bookmarks.
+;; `media-bookmark-switched' and `media-bookmark-stopped', and passes
+;; on requests to bookmark from the player with
+;; `media-bookmark-bookmark-requested'; the core takes care of
+;; buffers and bookmarks.
 ;;
 ;; Register the backend in `media-bookmark-backends' so that users
 ;; can choose it with `media-bookmark-backend'.
@@ -422,6 +424,31 @@ if it is still a media bookmark of SESSION's file."
       (setq candidate (format "%s<%d>" name (cl-incf n))))
     candidate))
 
+(defun media-bookmark--set-time (bookmark time)
+  "Set the position of BOOKMARK to TIME, and save it as `bookmark-store' does."
+  (unless (equal time (bookmark-prop-get bookmark 'media-time))
+    (bookmark-prop-set bookmark 'media-time time)
+    (bookmark-update-last-modified bookmark)
+    (cl-incf bookmark-alist-modification-count)
+    (bookmark-bmenu-surreptitiously-rebuild-list)
+    (when (bookmark-time-to-save-p)
+      (let ((inhibit-message t))
+        (bookmark-save)))))
+
+(defun media-bookmark--create-bookmark (session)
+  "Bookmark SESSION's media under its name, without prompting.
+Make it SESSION's bookmark, and return its name."
+  (with-current-buffer (media-bookmark-session-buffer session)
+    (bookmark-maybe-load-default-file)
+    (let ((record (media-bookmark-make-record)))
+      (let ((inhibit-message t))
+        ;; Also makes it the buffer's `bookmark-current-bookmark'.
+        (bookmark-store (media-bookmark--unique-name (car record))
+                        (cdr record) nil))
+      (bookmark-update-last-modified bookmark-current-bookmark)
+      (media-bookmark--redisplay session)
+      bookmark-current-bookmark)))
+
 (defun media-bookmark--update-bookmark (session)
   "Set the position of SESSION's bookmark to SESSION's time.
 If SESSION has no bookmark and is bookmarked automatically, create
@@ -430,26 +457,28 @@ one, unless the time is the start."
         (time (round (media-bookmark-session-time session))))
     (when (and media-bookmark-update-bookmarks (buffer-live-p buffer))
       (if-let* ((bookmark (media-bookmark--bookmark session)))
-          (unless (equal time (bookmark-prop-get bookmark 'media-time))
-            (bookmark-prop-set bookmark 'media-time time)
-            (bookmark-update-last-modified bookmark)
-            ;; As `bookmark-store' does.
-            (cl-incf bookmark-alist-modification-count)
-            (bookmark-bmenu-surreptitiously-rebuild-list)
-            (when (bookmark-time-to-save-p)
-              (let ((inhibit-message t))
-                (bookmark-save))))
+          (media-bookmark--set-time bookmark time)
         (when (and (media-bookmark-session-auto session) (> time 0))
-          (with-current-buffer buffer
-            (bookmark-maybe-load-default-file)
-            (let ((record (media-bookmark-make-record)))
-              (let ((inhibit-message t))
-                ;; Also makes it the buffer's `bookmark-current-bookmark'.
-                (bookmark-store (media-bookmark--unique-name (car record))
-                                (cdr record) nil))
-              (bookmark-update-last-modified bookmark-current-bookmark)
-              (message "Bookmarked \"%s\" at %s" bookmark-current-bookmark
-                       (media-bookmark--format-time time)))))))))
+          (message "Bookmarked \"%s\" at %s"
+                   (media-bookmark--create-bookmark session)
+                   (media-bookmark--format-time time)))))))
+
+(defun media-bookmark-bookmark-requested (session)
+  "Bookmark SESSION's media at its position, as its player asked.
+Backends call this when the user asks the player itself to bookmark,
+as with a key in its window.  If SESSION has a bookmark, update it;
+otherwise create one named after the media, without prompting.
+Return a message describing what was done, for the player to show."
+  (let* ((time (round (media-bookmark-session-time session)))
+         (bookmark (media-bookmark--bookmark session))
+         (name (if bookmark
+                   (progn (media-bookmark--set-time bookmark time)
+                          (bookmark-name-from-full-record bookmark))
+                 (media-bookmark--create-bookmark session)))
+         (text (format "Bookmarked \"%s\" at %s"
+                       name (media-bookmark--format-time time))))
+    (message "%s" text)
+    text))
 
 (defun media-bookmark--update-all-bookmarks ()
   "Update the bookmarks of all playing sessions."
