@@ -143,17 +143,23 @@ Without the script, mpv players are also found by:
 ** Where the session buffer is shown
 
 The session buffer is shown with =pop-to-buffer=, so
-=display-buffer-alist= decides where.  For example, to show it in a
-side window at the bottom, which =window-toggle-side-windows= hides and
-shows:
+=display-buffer-alist= decides where.  A side window at the bottom
+works well: it is only as tall as the buffer, closes with the player,
+and =window-toggle-side-windows= (=C-x w s= in Emacs 31) hides
+and shows it.
 
 #+begin_src emacs-lisp
 (add-to-list 'display-buffer-alist
              '("\\`\\*media: "
                (display-buffer-in-side-window)
                (side . bottom)
-               (window-height . fit-window-to-buffer)))
+               (slot . 0)
+               (dedicated . t)
+               (window-height . fit-window-to-buffer)
+               (preserve-size . (nil . t))))
 #+end_src
+
+In the =use-package= form, put it under =:init=.
 
 * Options
 
