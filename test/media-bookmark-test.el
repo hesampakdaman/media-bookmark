@@ -468,11 +468,14 @@
   media-bookmark-test--media)
 
 (defun media-bookmark-test--wait (predicate)
-  "Wait up to 10 seconds for PREDICATE to return non-nil."
-  (let ((deadline (+ (float-time) 10)))
-    (while (and (not (funcall predicate)) (< (float-time) deadline))
-      (accept-process-output nil 0.05)))
-  (should (funcall predicate)))
+  "Wait up to 10 seconds for PREDICATE to return non-nil, and return that."
+  (let ((deadline (+ (float-time) 10))
+        value)
+    (while (and (not (setq value (funcall predicate)))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (should value)
+    value))
 
 (defmacro media-bookmark-test--with-mpv (&rest body)
   "Run BODY as `media-bookmark-test--with', with a silent mpv backend."
@@ -565,7 +568,16 @@
       (unwind-protect
           (progn
             ;; mpv has no path until it has opened the file.
-            (media-bookmark-test--wait (lambda () (setq player (funcall find))))
+            (setq player
+                  (media-bookmark-test--wait
+                   (lambda ()
+                     (or (funcall find)
+                         (progn
+                           (message "No player yet: sockets %S, mpv alive %S, query %S"
+                                    (media-bookmark-mpv--sockets)
+                                    (process-live-p process)
+                                    (media-bookmark-mpv--query socket '("path")))
+                           nil)))))
             (should (equal (media-bookmark--normalize (plist-get player :file))
                            file))
             (media-bookmark-attach player)
