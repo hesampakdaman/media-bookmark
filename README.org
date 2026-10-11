@@ -66,7 +66,9 @@ configuration without the =:vc= line.
   its session buffer.  If the media has a bookmark, it resumes from it.
 - =m= in the session buffer (or =C-x r m= there), or
   =M-x media-bookmark-set= from any buffer, bookmarks the position.
-  The default name is the media's title.
+  The default name is the media's title.  With the mpv script
+  installed, so does =Ctrl+b= in mpv's window, without asking for a
+  name; see [[*Bookmarking from mpv]].
 - =C-x r b= (=bookmark-jump=) or =C-x r l= (=bookmark-bmenu-list=)
   resumes media from anywhere.  Media bookmarks are listed with type
   "Media".
@@ -129,8 +131,9 @@ M-x media-bookmark-mpv-install-script
 It copies =mpv/media-bookmark.lua= to mpv's =scripts= directory.  From
 then on, every mpv gets its own socket, however it was started (from a
 terminal, a file manager, ...), in =media-bookmark-mpv-socket-directory=,
-where =media-bookmark-attach= looks.  Players already running when you
-install it need a restart.
+where =media-bookmark-attach= looks, and =Ctrl+b= to bookmark from mpv.
+Players already running when you install it need a restart.  Run it
+again after upgrading media-bookmark, to update the script.
 
 Without the script, mpv players are also found by:
 
@@ -139,6 +142,20 @@ Without the script, mpv players are also found by:
   All mpv players then share that socket, so only the latest can be
   attached to;
 - =media-bookmark-mpv-sockets=, a list of socket files.
+
+** Bookmarking from mpv
+
+mpv's window usually has the focus while you watch.  With the mpv
+script installed (see below), =Ctrl+b= there bookmarks what mpv plays:
+it updates the session's bookmark, or creates one named after the
+media.  mpv shows what was bookmarked, or, if no Emacs follows it,
+says so: then run =M-x media-bookmark-attach= first.
+
+To use another key, add to mpv's =input.conf=:
+
+#+begin_example
+KEY script-binding media_bookmark/bookmark
+#+end_example
 
 ** Where the session buffer is shown
 
@@ -245,6 +262,10 @@ on first use:
 (add-to-list 'media-bookmark-backends '(vlc . media-bookmark-vlc))
 (setopt media-bookmark-backend 'vlc)
 #+end_src
+
+If the player can ask to bookmark, as with a key in its window, call
+=(media-bookmark-bookmark-requested session)=.  It updates or creates
+the bookmark, and returns a message for the player to show.
 
 To support =media-bookmark-attach=, also implement
 =media-bookmark-backend-players=, which returns the running players the

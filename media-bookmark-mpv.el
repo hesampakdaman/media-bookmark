@@ -14,6 +14,11 @@
 ;; IPC" in the mpv manual).  mpv's position, duration, pause state and
 ;; title are observed as they change and reported to the session.
 ;;
+;; The mpv script mpv/media-bookmark.lua, installed with
+;; `media-bookmark-mpv-install-script', gives mpv players started
+;; elsewhere a socket, for `media-bookmark-attach', and binds Ctrl+b in
+;; mpv to bookmark what it plays.
+;;
 ;; This file only implements the backend interface of
 ;; media-bookmark.el, and can serve as a template for other players.
 
@@ -177,6 +182,14 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
     ("end-file"
      (when (equal (plist-get message :reason) "eof")
        (setf (media-bookmark-mpv--state-finished mpv) t)))
+    ("client-message"
+     ;; Sent by mpv/media-bookmark.lua, with a key in mpv's window.
+     (when (equal (append (plist-get message :args) nil)
+                  '("media-bookmark" "bookmark"))
+       ;; mpv names the script media_bookmark.
+       (media-bookmark-mpv--send mpv "script-message-to" "media_bookmark"
+                                 "bookmarked"
+                                 (media-bookmark-bookmark-requested session))))
     ("start-file"
      (setf (media-bookmark-mpv--state-loading mpv) t))
     ("file-loaded"
