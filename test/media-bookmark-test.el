@@ -1,0 +1,354 @@
+;;; media-bookmark-test.el --- Tests for media-bookmark -*- lexical-binding: t; -*-
+
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;;; Commentary:
+
+;; The core is tested with a fake `test' backend that records the
+;; calls it gets, and the mpv backend with a real mpv, if installed,
+;; playing a short tone it encodes first.
+;;
+;; Run with:
+;;
+;;   emacs --batch -Q -L . -l test/media-bookmark-test.el \
+;;     -f ert-run-tests-batch-and-exit
+
+;;; Code:
+
+(require 'ert)
+(require 'media-bookmark)
+(require 'media-bookmark-mpv)
+
+;;;; Fake backend
+
+(defvar media-bookmark-test--calls nil
+  "Calls to the `test' backend, most recent first.")
+
+(cl-defmethod media-bookmark-backend-play ((_ (eql 'test)) session start)
+  (push (list 'play (media-bookmark-session-file session) start)
+        media-bookmark-test--calls))
+
+(cl-defmethod media-bookmark-backend-seek ((_ (eql 'test)) _session time)
+  (push (list 'seek time) media-bookmark-test--calls))
+
+(cl-defmethod media-bookmark-backend-toggle-pause ((_ (eql 'test)) _session)
+  (push (list 'toggle-pause) media-bookmark-test--calls))
+
+(cl-defmethod media-bookmark-backend-stop ((_ (eql 'test)) session)
+  (push (list 'stop) media-bookmark-test--calls)
+  (media-bookmark-stopped session))
+
+(defmacro media-bookmark-test--with (&rest body)
+  "Run BODY with no bookmarks, and the `test' backend by default."
+  (declare (indent 0) (debug t))
+  `(let* ((dir (make-temp-file "media-bookmark-test-" t))
+          (bookmark-default-file (expand-file-name "bookmarks" dir))
+          (bookmark-alist nil)
+          (bookmark-bookmarks-timestamp nil)
+          (bookmark-alist-modification-count 0)
+          (bookmark-save-flag nil)
+          (bookmark-automatically-show-annotations nil)
+          (media-bookmark-backends (cons '(test . media-bookmark)
+                                         media-bookmark-backends))
+          (media-bookmark-backend 'test)
+          (media-bookmark-update-bookmarks t)
+          (media-bookmark-rewind-when-finished t)
+          (media-bookmark-test--calls nil))
+     (unwind-protect
+         (progn ,@body)
+       (dolist (buffer (buffer-list))
+         (when (buffer-local-value 'media-bookmark--session buffer)
+           (kill-buffer buffer)))
+       (delete-directory dir t))))
+
+(defun media-bookmark-test--session (buffer)
+  "Return the session of BUFFER."
+  (buffer-local-value 'media-bookmark--session buffer))
+
+(defun media-bookmark-test--add (name file time)
+  "Add a media bookmark NAME for FILE at TIME, with the `test' backend."
+  (push `(,name (filename . ,file) (media-time . ,time)
+                (media-backend . test) (handler . media-bookmark-jump))
+        bookmark-alist))
+
+(defun media-bookmark-test--time (name)
+  "Return the media time of bookmark NAME."
+  (bookmark-prop-get name 'media-time))
+
+;;;; Core
+
+(ert-deftest media-bookmark-test-set ()
+  "\\[bookmark-set] in a session buffer records the position."
+  (media-bookmark-test--with
+    (let ((buffer (media-bookmark--play "/m/a.ogg" 'test nil)))
+      (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
+      (media-bookmark-update (media-bookmark-test--session buffer) :time 61.6)
+      (with-current-buffer buffer
+        (bookmark-set "a")
+        (should (equal bookmark-current-bookmark "a")))
+      (should (equal (bookmark-get-filename "a") "/m/a.ogg"))
+      (should (equal (media-bookmark-test--time "a") 62))
+      (should (eq (bookmark-get-handler "a") 'media-bookmark-jump))
+      (should (equal (bookmark-type-from-full-record (bookmark-get-bookmark "a"))
+                     "Media")))))
+
+(ert-deftest media-bookmark-test-default-name ()
+  "The default bookmark name is the title, or else the file name."
+  (media-bookmark-test--with
+    (let ((buffer (media-bookmark--play "/m/a.ogg" 'test nil)))
+      (with-current-buffer buffer
+        (should (equal (car (bookmark-make-record)) "a.ogg"))
+        (media-bookmark-update media-bookmark--session :title "A song")
+        (should (equal (car (bookmark-make-record)) "A song"))
+        (should (equal (buffer-name) "*media: A song*"))))))
+
+(ert-deftest media-bookmark-test-jump ()
+  "Jumping plays from the bookmark and makes it the session's."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (should (equal media-bookmark-test--calls '((play "/m/a.ogg" 30))))
+    (let ((buffer (media-bookmark--find-buffer "/m/a.ogg")))
+      (should (equal (buffer-local-value 'bookmark-current-bookmark buffer) "a"))
+      (should (equal (media-bookmark-session-time
+                      (media-bookmark-test--session buffer))
+                     30)))))
+
+(ert-deftest media-bookmark-test-jump-while-playing ()
+  "Jumping to media that plays seeks, and saves the bookmark left."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (media-bookmark-test--add "b" "/m/a.ogg" 500)
+    (bookmark-jump "a" #'ignore)
+    (media-bookmark-update (media-bookmark-test--session
+                            (media-bookmark--find-buffer "/m/a.ogg"))
+                           :time 45)
+    (bookmark-jump "b" #'ignore)
+    (should (equal media-bookmark-test--calls
+                   '((seek 500) (play "/m/a.ogg" 30))))
+    (should (equal (media-bookmark-test--time "a") 45))
+    (should (equal (buffer-local-value 'bookmark-current-bookmark
+                                       (media-bookmark--find-buffer "/m/a.ogg"))
+                   "b"))))
+
+(ert-deftest media-bookmark-test-follows-playback ()
+  "The bookmark is updated on pause and stop, not while playing."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--find-buffer "/m/a.ogg"))))
+      (media-bookmark-update session :time 40)
+      (should (equal (media-bookmark-test--time "a") 30))
+      (media-bookmark-update session :paused t)
+      (should (equal (media-bookmark-test--time "a") 40))
+      (should (= bookmark-alist-modification-count 1))
+      (should (bookmark-prop-get "a" 'last-modified))
+      (media-bookmark-update session :paused nil :time 90.4)
+      (media-bookmark-stopped session)
+      (should (equal (media-bookmark-test--time "a") 90))
+      (should-not (media-bookmark-session-live session)))))
+
+(ert-deftest media-bookmark-test-finished ()
+  "Media played to the end is bookmarked at the start, if so configured."
+  (dolist (rewind '(t nil))
+    (media-bookmark-test--with
+      (setq media-bookmark-rewind-when-finished rewind)
+      (media-bookmark-test--add "a" "/m/a.ogg" 30)
+      (bookmark-jump "a" #'ignore)
+      (let ((session (media-bookmark-test--session
+                      (media-bookmark--find-buffer "/m/a.ogg"))))
+        (media-bookmark-update session :time 180)
+        (media-bookmark-stopped session t)
+        (should (equal (media-bookmark-test--time "a") (if rewind 0 180)))))))
+
+(ert-deftest media-bookmark-test-no-update ()
+  "With `media-bookmark-update-bookmarks' nil, bookmarks stay put."
+  (media-bookmark-test--with
+    (setq media-bookmark-update-bookmarks nil)
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--find-buffer "/m/a.ogg"))))
+      (media-bookmark-update session :time 40 :paused t)
+      (media-bookmark-stopped session)
+      (should (equal (media-bookmark-test--time "a") 30)))))
+
+(ert-deftest media-bookmark-test-other-bookmark-untouched ()
+  "A session's bookmark for another file is not updated."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((buffer (media-bookmark--find-buffer "/m/a.ogg")))
+      (bookmark-set-filename "a" "/m/b.ogg")
+      (media-bookmark-update (media-bookmark-test--session buffer) :time 99)
+      (media-bookmark-stopped (media-bookmark-test--session buffer))
+      (should (equal (media-bookmark-test--time "a") 30)))))
+
+(ert-deftest media-bookmark-test-save-flag ()
+  "Updates are written to disk according to `bookmark-save-flag'."
+  (media-bookmark-test--with
+    (setq bookmark-save-flag 1)
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--find-buffer "/m/a.ogg"))))
+      (media-bookmark-update session :time 77 :paused t)
+      (should (file-exists-p bookmark-default-file))
+      (setq bookmark-alist nil)
+      (bookmark-load bookmark-default-file t)
+      (should (equal (media-bookmark-test--time "a") 77)))))
+
+(ert-deftest media-bookmark-test-kill-buffer ()
+  "Killing a session buffer updates the bookmark and stops the player."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((buffer (media-bookmark--find-buffer "/m/a.ogg")))
+      (media-bookmark-update (media-bookmark-test--session buffer) :time 50)
+      (kill-buffer buffer)
+      (should (equal (car media-bookmark-test--calls) '(stop)))
+      (should (equal (media-bookmark-test--time "a") 50)))))
+
+(ert-deftest media-bookmark-test-kill-emacs ()
+  "Bookmarks of playing sessions are updated before Emacs saves them."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (media-bookmark-update (media-bookmark-test--session
+                            (media-bookmark--find-buffer "/m/a.ogg"))
+                           :time 65)
+    (should (< (seq-position kill-emacs-hook
+                             #'media-bookmark--update-all-bookmarks)
+               (or (seq-position kill-emacs-hook #'bookmark-exit-hook-internal)
+                   most-positive-fixnum)))
+    (media-bookmark--update-all-bookmarks)
+    (should (equal (media-bookmark-test--time "a") 65))))
+
+(ert-deftest media-bookmark-test-commands ()
+  "Session buffer commands drive the backend."
+  (media-bookmark-test--with
+    (let ((buffer (media-bookmark--play "/m/a.ogg" 'test 100)))
+      (with-current-buffer buffer
+        (media-bookmark-toggle-pause)
+        (media-bookmark-seek-forward 2)
+        (media-bookmark-seek-backward)
+        (media-bookmark-stop)
+        (should (equal (nreverse media-bookmark-test--calls)
+                       '((play "/m/a.ogg" 100) (toggle-pause)
+                         (seek 120) (seek 110) (stop))))
+        ;; Stopped: play again from where it stopped.
+        (setq media-bookmark-test--calls nil)
+        (media-bookmark-toggle-pause)
+        (should (equal media-bookmark-test--calls '((play "/m/a.ogg" 110))))
+        (should (string-match-p "Playing" (buffer-string)))))))
+
+(ert-deftest media-bookmark-test-unknown-backend ()
+  "An unregistered backend is reported, and the session is not left live."
+  (media-bookmark-test--with
+    (let ((err (should-error (media-bookmark--play "/m/a.ogg" 'nope 0)
+                             :type 'user-error)))
+      (should (string-match-p "nope" (cadr err))))
+    (should-not (media-bookmark-session-live
+                 (media-bookmark-test--session
+                  (media-bookmark--find-buffer "/m/a.ogg"))))))
+
+(ert-deftest media-bookmark-test-normalize ()
+  (should (equal (media-bookmark--normalize "https://e.com/v?x=1")
+                 "https://e.com/v?x=1"))
+  (should (equal (media-bookmark--normalize "/m/../m/a.ogg") "/m/a.ogg"))
+  (should (equal (media-bookmark--format-time 65) "1:05"))
+  (should (equal (media-bookmark--format-time 3725.4) "1:02:05")))
+
+;;;; mpv
+
+(defvar media-bookmark-test--media nil
+  "A 20-second tone, encoded by mpv for the mpv tests.")
+
+(defun media-bookmark-test--media ()
+  "Return `media-bookmark-test--media', encoding it first if needed."
+  (unless (and media-bookmark-test--media
+               (file-exists-p media-bookmark-test--media))
+    (let ((file (make-temp-file "media-bookmark-test-" nil ".ogg")))
+      (should (zerop (call-process "mpv" nil nil nil "--no-config"
+                                   "--really-quiet"
+                                   "av://lavfi:sine=frequency=440:duration=20"
+                                   (concat "--o=" file))))
+      (setq media-bookmark-test--media file)))
+  media-bookmark-test--media)
+
+(defun media-bookmark-test--wait (predicate)
+  "Wait up to 10 seconds for PREDICATE to return non-nil."
+  (let ((deadline (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05)))
+  (should (funcall predicate)))
+
+(defmacro media-bookmark-test--with-mpv (&rest body)
+  "Run BODY as `media-bookmark-test--with', with a silent mpv backend."
+  (declare (indent 0) (debug t))
+  `(progn
+     (skip-unless (executable-find "mpv"))
+     (media-bookmark-test--with
+       (let ((media-bookmark-backend 'mpv)
+             (media-bookmark-mpv-arguments '("--no-config" "--ao=null"
+                                             "--vo=null")))
+         ,@body))))
+
+(ert-deftest media-bookmark-test-mpv-resume ()
+  "mpv starts from the bookmark, and quitting it updates the bookmark."
+  (media-bookmark-test--with-mpv
+    (let ((file (media-bookmark--normalize (media-bookmark-test--media))))
+      (push `("tone" (filename . ,file) (media-time . 5) (media-backend . mpv)
+              (handler . media-bookmark-jump))
+            bookmark-alist)
+      (bookmark-jump "tone" #'ignore)
+      (let* ((buffer (media-bookmark--find-buffer file))
+             (session (media-bookmark-test--session buffer)))
+        (media-bookmark-test--wait
+         (lambda () (>= (media-bookmark-session-time session) 6.5)))
+        (should (equal (media-bookmark-session-title session)
+                       (file-name-nondirectory file)))
+        (should (< 19 (media-bookmark-session-duration session) 21))
+        (with-current-buffer buffer
+          (media-bookmark-toggle-pause))
+        (media-bookmark-test--wait
+         (lambda () (media-bookmark-session-paused session)))
+        (should (<= 6 (media-bookmark-test--time "tone") 9))
+        (with-current-buffer buffer
+          (media-bookmark-seek-forward))
+        (with-current-buffer buffer
+          (media-bookmark-stop))
+        (media-bookmark-test--wait
+         (lambda () (not (media-bookmark-session-live session))))
+        (should (<= 16 (media-bookmark-test--time "tone") 19))))))
+
+(ert-deftest media-bookmark-test-mpv-finished ()
+  "mpv playing to the end rewinds the bookmark."
+  (media-bookmark-test--with-mpv
+    (let ((file (media-bookmark--normalize (media-bookmark-test--media))))
+      (push `("tone" (filename . ,file) (media-time . 18.5) (media-backend . mpv)
+              (handler . media-bookmark-jump))
+            bookmark-alist)
+      (bookmark-jump "tone" #'ignore)
+      (let ((session (media-bookmark-test--session
+                      (media-bookmark--find-buffer file))))
+        (media-bookmark-test--wait
+         (lambda () (not (media-bookmark-session-live session))))
+        (should (equal (media-bookmark-test--time "tone") 0))))))
+
+(ert-deftest media-bookmark-test-mpv-kill-buffer ()
+  "Killing the session buffer quits mpv."
+  (media-bookmark-test--with-mpv
+    (let* ((file (media-bookmark--normalize (media-bookmark-test--media)))
+           (buffer (media-bookmark--play file 'mpv nil))
+           (session (media-bookmark-test--session buffer))
+           (process (media-bookmark-mpv--state-process
+                     (media-bookmark-session-data session))))
+      (media-bookmark-test--wait
+       (lambda () (> (media-bookmark-session-time session) 0.5)))
+      (kill-buffer buffer)
+      (media-bookmark-test--wait (lambda () (not (process-live-p process)))))))
+
+(provide 'media-bookmark-test)
+;;; media-bookmark-test.el ends here

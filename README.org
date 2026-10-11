@@ -1,0 +1,147 @@
+#+title: media-bookmark
+
+Bookmark audio and video in Emacs, and resume where you left off.
+
+media-bookmark makes media files and URLs ordinary Emacs bookmarks,
+the way PDF and EPUB readers do for documents.  A bookmark remembers
+the playback position; jumping to it plays the media from there.  While
+the media plays, the bookmark follows along, so pausing or quitting the
+player saves your place.
+
+Players are pluggable backends.  [[https://mpv.io][mpv]] is included.
+
+* Installation
+
+Requires Emacs 29.1 or later, and for the included backend, mpv.
+
+#+begin_src emacs-lisp
+(use-package media-bookmark
+  :vc (:url "https://github.com/hesampakdaman/media-bookmark"))
+#+end_src
+
+* Usage
+
+- =M-x media-bookmark-play= plays a file (with =C-u=, a URL) and shows
+  its session buffer.
+- In the session buffer, =C-x r m= (=bookmark-set=) bookmarks the
+  position.  The default name is the media's title.
+- Later, =C-x r b= (=bookmark-jump=) or =C-x r l= (=bookmark-bmenu-list=)
+  resumes it from anywhere.  Media bookmarks are listed with type
+  "Media".
+
+In the session buffer:
+
+| Key            | Command                         |
+|----------------+---------------------------------|
+| =SPC=          | pause, resume, or play again    |
+| =f= / =<right>= | seek forward                    |
+| =b= / =<left>=  | seek backward                   |
+| =s=            | quit the player                 |
+| =q=            | quit the window                 |
+
+Killing the session buffer quits the player.
+
+** How bookmarks are updated
+
+A session's bookmark is the one last set or jumped to in its buffer
+(=bookmark-current-bookmark=, as for any other buffer).  It is updated
+to the current position when the player pauses or stops, when you jump
+to another bookmark of the same media, and when Emacs exits.  Updated
+bookmarks are written to disk according to =bookmark-save-flag=, as
+with =bookmark-set=.
+
+Media played to the end is bookmarked at the start; see
+=media-bookmark-rewind-when-finished=.  To update bookmarks only with
+=C-x r m=, set =media-bookmark-update-bookmarks= to nil.
+
+Playback must be started from Emacs (=media-bookmark-play= or a
+bookmark jump), so that Emacs can follow the player.
+
+* Options
+
+| Option                               | Default | Meaning                                      |
+|--------------------------------------+---------+----------------------------------------------|
+| =media-bookmark-backend=             | =mpv=   | player for =media-bookmark-play=             |
+| =media-bookmark-backends=            |         | available backends and their libraries       |
+| =media-bookmark-update-bookmarks=    | =t=     | bookmarks follow playback                    |
+| =media-bookmark-rewind-when-finished= | =t=     | finished media is bookmarked at the start    |
+| =media-bookmark-seek-step=           | =10=    | seconds per seek                             |
+| =media-bookmark-mpv-program=         | ="mpv"= | mpv executable                               |
+| =media-bookmark-mpv-arguments=       | =nil=   | extra mpv arguments, such as ="--fs"=        |
+
+A bookmark remembers its backend, so changing =media-bookmark-backend=
+affects new playback only.
+
+* Writing a backend
+
+A backend connects media-bookmark to a player.  The core
+(=media-bookmark.el=) handles bookmarks, session buffers and commands,
+and knows nothing about particular players; a backend only starts and
+controls its player and reports what it does.  =media-bookmark-mpv.el=
+is the reference implementation.
+
+A backend is named by a symbol and implements four generic functions,
+with methods specialized on =(eql NAME)=:
+
+| Generic function                       | Does                                     |
+|----------------------------------------+------------------------------------------|
+| =media-bookmark-backend-play=          | start the player, from a position or not |
+| =media-bookmark-backend-seek=          | go to a position                         |
+| =media-bookmark-backend-toggle-pause=  | pause or resume                          |
+| =media-bookmark-backend-stop=          | quit the player                          |
+
+Each gets the =media-bookmark-session=: the media is
+=(media-bookmark-session-file session)=, a file name or, if
+=media-bookmark-url-p=, a URL, and the backend may keep its own state,
+such as a process, in =(media-bookmark-session-data session)=.
+
+The backend reports what the player does:
+
+- =(media-bookmark-update session :time SECONDS :duration SECONDS :title STRING :paused BOOL)=,
+  with any of the properties, whenever they change.  Report =:time= as
+  it changes (or poll it), since some players, like mpv, are gone
+  before they can be asked for the final position.
+- =(media-bookmark-stopped session FINISHED)= when the player exits,
+  with FINISHED non-nil if it played to the end.
+
+A skeleton:
+
+#+begin_src emacs-lisp
+;;; media-bookmark-vlc.el --- Media-bookmark backend for VLC -*- lexical-binding: t; -*-
+
+(require 'media-bookmark)
+
+(cl-defmethod media-bookmark-backend-play ((_backend (eql 'vlc)) session start)
+  ;; Start VLC on (media-bookmark-session-file session) from START,
+  ;; keep the process in (media-bookmark-session-data session), and
+  ;; call `media-bookmark-update' and `media-bookmark-stopped' from
+  ;; its filter and sentinel.
+  )
+
+(cl-defmethod media-bookmark-backend-seek ((_backend (eql 'vlc)) session time) ...)
+(cl-defmethod media-bookmark-backend-toggle-pause ((_backend (eql 'vlc)) session) ...)
+(cl-defmethod media-bookmark-backend-stop ((_backend (eql 'vlc)) session) ...)
+
+(provide 'media-bookmark-vlc)
+#+end_src
+
+Register it so that users can choose it, which also loads the library
+on first use:
+
+#+begin_src emacs-lisp
+(add-to-list 'media-bookmark-backends '(vlc . media-bookmark-vlc))
+(setopt media-bookmark-backend 'vlc)
+#+end_src
+
+Backends contributed to this repository are added to the default of
+=media-bookmark-backends=.  The tests in =test/media-bookmark-test.el=
+include a fake backend, and mpv tests that are a model for testing a
+real player.
+
+* Development
+
+#+begin_src sh
+emacs --batch -Q -L . -l test/media-bookmark-test.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+The mpv tests run if mpv is installed.
