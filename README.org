@@ -22,18 +22,22 @@ Requires Emacs 29.1 or later, and for the included backend, mpv.
 * Usage
 
 - =M-x media-bookmark-play= plays a file (with =C-u=, a URL) and shows
-  its session buffer.
-- In the session buffer, =C-x r m= (=bookmark-set=) bookmarks the
-  position.  The default name is the media's title.
-- Later, =C-x r b= (=bookmark-jump=) or =C-x r l= (=bookmark-bmenu-list=)
-  resumes it from anywhere.  Media bookmarks are listed with type
+  its session buffer.  The media is bookmarked automatically, under its
+  title, when you first pause or stop it; playing it again resumes from
+  that bookmark.
+- =C-x r b= (=bookmark-jump=) or =C-x r l= (=bookmark-bmenu-list=)
+  resumes media from anywhere.  Media bookmarks are listed with type
   "Media".
+- To add a bookmark of your own, such as a favourite scene, press =m=
+  in the session buffer (or =C-x r m= there), or =M-x media-bookmark-set=
+  from any buffer.
 
 In the session buffer:
 
 | Key            | Command                         |
 |----------------+---------------------------------|
 | =SPC=          | pause, resume, or play again    |
+| =m=            | bookmark the position           |
 | =f= / =<right>= | seek forward                    |
 | =b= / =<left>=  | seek backward                   |
 | =s=            | quit the player                 |
@@ -51,8 +55,10 @@ bookmarks are written to disk according to =bookmark-save-flag=, as
 with =bookmark-set=.
 
 Media played to the end is bookmarked at the start; see
-=media-bookmark-rewind-when-finished=.  To update bookmarks only with
-=C-x r m=, set =media-bookmark-update-bookmarks= to nil.
+=media-bookmark-rewind-when-finished=.  To bookmark media only with =m=
+or =C-x r m=, set =media-bookmark-auto-bookmark= to nil; to also stop
+bookmarks from following playback, set =media-bookmark-update-bookmarks=
+to nil.
 
 Playback must be started from Emacs (=media-bookmark-play= or a
 bookmark jump), so that Emacs can follow the player.
@@ -63,6 +69,7 @@ bookmark jump), so that Emacs can follow the player.
 |--------------------------------------+---------+----------------------------------------------|
 | =media-bookmark-backend=             | =mpv=   | player for =media-bookmark-play=             |
 | =media-bookmark-backends=            |         | available backends and their libraries       |
+| =media-bookmark-auto-bookmark=       | =t=     | bookmark and resume automatically            |
 | =media-bookmark-update-bookmarks=    | =t=     | bookmarks follow playback                    |
 | =media-bookmark-rewind-when-finished= | =t=     | finished media is bookmarked at the start    |
 | =media-bookmark-seek-step=           | =10=    | seconds per seek                             |

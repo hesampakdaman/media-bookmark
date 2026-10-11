@@ -20,10 +20,14 @@
 ;; Usage:
 ;;
 ;;   M-x media-bookmark-play   play a file (with C-u, a URL) in a player
+;;   M-x media-bookmark-set    bookmark the playing media
 ;;
-;; This shows a session buffer for the playing media.  In it,
-;; \\[bookmark-set] (C-x r m) bookmarks the current position, and
-;; \\[bookmark-jump] (C-x r b) later resumes from it, from any buffer.
+;; Playing shows a session buffer for the media.  The media is
+;; bookmarked automatically when you first pause or stop it, and
+;; playing it again resumes from there; see
+;; `media-bookmark-auto-bookmark'.  In the session buffer, m or
+;; \\[bookmark-set] (C-x r m) adds a bookmark of your own, and
+;; \\[bookmark-jump] (C-x r b) resumes any of them from any buffer.
 ;;
 ;; While the media plays, the session's bookmark (the one it was set
 ;; or jumped from) follows playback: it is updated when you pause,
@@ -60,6 +64,15 @@ The bookmark is updated when the player pauses or stops, and when
 Emacs exits.  It is written to disk according to `bookmark-save-flag'."
   :type 'boolean)
 
+(defcustom media-bookmark-auto-bookmark t
+  "Non-nil means `media-bookmark-play' bookmarks media automatically.
+Playing media that has a media bookmark resumes from it.  Otherwise,
+the media is bookmarked under its title the first time its position
+is saved, as for `media-bookmark-update-bookmarks', unless that
+position is the start.  When nil, use \[bookmark-set] in the session
+buffer to bookmark media."
+  :type 'boolean)
+
 (defcustom media-bookmark-rewind-when-finished t
   "Non-nil means media played to the end is bookmarked at the start."
   :type 'boolean)
@@ -75,9 +88,10 @@ and \\[media-bookmark-seek-backward] move."
                (:constructor media-bookmark--make-session)
                (:copier nil))
   "Media playing, or played, in a session buffer.
-FILE is a file name or URL.  TIME and DURATION are in seconds.  DATA
-belongs to the backend."
-  backend file title (time 0) duration paused live buffer timer data)
+FILE is a file name or URL.  TIME and DURATION are in seconds.  AUTO
+non-nil means bookmark the media automatically.  DATA belongs to the
+backend."
+  backend file title (time 0) duration paused live buffer timer auto data)
 
 (defvar-local media-bookmark--session nil
   "The `media-bookmark-session' of a session buffer.")
@@ -108,10 +122,10 @@ belongs to the backend."
                   (equal file (media-bookmark-session-file session))))
               (buffer-list)))
 
-(defun media-bookmark--play (file backend start)
+(defun media-bookmark--play (file backend start &optional auto)
   "Play FILE with BACKEND from START seconds and return its session buffer.
 START nil lets the player choose.  If FILE is already playing, seek
-to START instead."
+to START instead.  AUTO non-nil means bookmark FILE automatically."
   (let* ((buffer (media-bookmark--find-buffer file))
          (session (and buffer
                        (buffer-local-value 'media-bookmark--session buffer))))
@@ -132,7 +146,7 @@ to START instead."
           (media-bookmark-mode)))
       (setq session (media-bookmark--make-session
                      :backend backend :file file :buffer buffer
-                     :time (or start 0)))
+                     :time (or start 0) :auto auto))
       (with-current-buffer buffer
         (setq media-bookmark--session session))
       (media-bookmark--start session start))
@@ -286,28 +300,72 @@ This is the handler of media bookmarks."
 ;;;###autoload
 (put 'media-bookmark-jump 'bookmark-handler-type "Media")
 
-(defun media-bookmark--update-bookmark (session)
-  "Set the position of SESSION's bookmark to SESSION's time.
-The bookmark is the one last set or jumped to in SESSION's buffer."
+(defun media-bookmark--bookmark (session)
+  "Return the bookmark of SESSION, or nil if it has none.
+The bookmark is the one last set or jumped to in SESSION's buffer,
+if it is still a media bookmark of SESSION's file."
   (let ((buffer (media-bookmark-session-buffer session)))
-    (when-let* ((media-bookmark-update-bookmarks)
-                ((buffer-live-p buffer))
+    (when-let* (((buffer-live-p buffer))
                 (name (buffer-local-value 'bookmark-current-bookmark buffer))
                 (bookmark (bookmark-get-bookmark name 'noerror))
                 ((eq (bookmark-get-handler bookmark) 'media-bookmark-jump))
                 ((equal (media-bookmark--normalize
                          (bookmark-get-filename bookmark))
-                        (media-bookmark-session-file session)))
-                (time (round (media-bookmark-session-time session)))
-                ((not (equal time (bookmark-prop-get bookmark 'media-time)))))
-      (bookmark-prop-set bookmark 'media-time time)
-      (bookmark-update-last-modified bookmark)
-      ;; As `bookmark-store' does.
-      (cl-incf bookmark-alist-modification-count)
-      (bookmark-bmenu-surreptitiously-rebuild-list)
-      (when (bookmark-time-to-save-p)
-        (let ((inhibit-message t))
-          (bookmark-save))))))
+                        (media-bookmark-session-file session))))
+      bookmark)))
+
+(defun media-bookmark--find-bookmark (file)
+  "Return the media bookmark of FILE modified last, or nil if none."
+  (bookmark-maybe-load-default-file)
+  (let (found)
+    (dolist (bookmark bookmark-alist)
+      (when (and (eq (bookmark-get-handler bookmark) 'media-bookmark-jump)
+                 (equal (media-bookmark--normalize
+                         (bookmark-get-filename bookmark))
+                        file)
+                 (or (null found)
+                     (time-less-p
+                      (or (bookmark-prop-get found 'last-modified) 0)
+                      (or (bookmark-prop-get bookmark 'last-modified) 0))))
+        (setq found bookmark)))
+    found))
+
+(defun media-bookmark--unique-name (name)
+  "Return NAME, or NAME<N> if a bookmark is already named NAME."
+  (let ((candidate name)
+        (n 1))
+    (while (bookmark-get-bookmark candidate 'noerror)
+      (setq candidate (format "%s<%d>" name (cl-incf n))))
+    candidate))
+
+(defun media-bookmark--update-bookmark (session)
+  "Set the position of SESSION's bookmark to SESSION's time.
+If SESSION has no bookmark and is bookmarked automatically, create
+one, unless the time is the start."
+  (let ((buffer (media-bookmark-session-buffer session))
+        (time (round (media-bookmark-session-time session))))
+    (when (and media-bookmark-update-bookmarks (buffer-live-p buffer))
+      (if-let* ((bookmark (media-bookmark--bookmark session)))
+          (unless (equal time (bookmark-prop-get bookmark 'media-time))
+            (bookmark-prop-set bookmark 'media-time time)
+            (bookmark-update-last-modified bookmark)
+            ;; As `bookmark-store' does.
+            (cl-incf bookmark-alist-modification-count)
+            (bookmark-bmenu-surreptitiously-rebuild-list)
+            (when (bookmark-time-to-save-p)
+              (let ((inhibit-message t))
+                (bookmark-save))))
+        (when (and (media-bookmark-session-auto session) (> time 0))
+          (with-current-buffer buffer
+            (bookmark-maybe-load-default-file)
+            (let ((record (media-bookmark-make-record)))
+              (let ((inhibit-message t))
+                ;; Also makes it the buffer's `bookmark-current-bookmark'.
+                (bookmark-store (media-bookmark--unique-name (car record))
+                                (cdr record) nil))
+              (bookmark-update-last-modified bookmark-current-bookmark)
+              (message "Bookmarked \"%s\" at %s" bookmark-current-bookmark
+                       (media-bookmark--format-time time)))))))))
 
 (defun media-bookmark--update-all-bookmarks ()
   "Update the bookmarks of all playing sessions."
@@ -356,15 +414,21 @@ The bookmark is the one last set or jumped to in SESSION's buffer."
                                          ((media-bookmark-session-paused session)
                                           "Paused")
                                          (t "Playing")))
-                         ("Bookmark" ,(or bookmark-current-bookmark
-                                          (substitute-command-keys
-                                           "None; \\[bookmark-set] sets one")))))
+                         ("Bookmark" ,(cond
+                                       ((media-bookmark--bookmark session)
+                                        bookmark-current-bookmark)
+                                       ((and (media-bookmark-session-auto session)
+                                             media-bookmark-update-bookmarks)
+                                        "None yet; set when paused or stopped")
+                                       (t (substitute-command-keys
+                                           "None; \\[bookmark-set] sets one"))))))
             (insert (format "  %-9s %s\n" (car row) (cadr row))))
           (insert "\n"
                   (substitute-command-keys
                    "\\<media-bookmark-mode-map>\\[media-bookmark-toggle-pause] \
 pause/play  \\[media-bookmark-seek-backward]/\\[media-bookmark-seek-forward] \
-seek  \\[media-bookmark-stop] stop  \\[quit-window] quit window")
+seek  \\[media-bookmark-set] bookmark  \\[media-bookmark-stop] stop  \\[quit-window] \
+quit window")
                   "\n")
           (goto-char (min point (point-max))))))))
 
@@ -417,8 +481,37 @@ If the player has stopped, play again from where it stopped."
       (media-bookmark-backend-stop (media-bookmark-session-backend session)
                                    session))))
 
+(defun media-bookmark--read-session-buffer ()
+  "Return the buffer of the playing media, read if there are several."
+  (let ((buffers (cl-remove-if-not
+                  (lambda (buffer)
+                    (when-let* ((session (buffer-local-value
+                                          'media-bookmark--session buffer)))
+                      (media-bookmark-session-live session)))
+                  (buffer-list))))
+    (cond ((null buffers) (user-error "No media is playing"))
+          ((null (cdr buffers)) (car buffers))
+          (t (get-buffer (completing-read "Bookmark media: "
+                                          (mapcar #'buffer-name buffers)
+                                          nil t))))))
+
+;;;###autoload
+(defun media-bookmark-set ()
+  "Bookmark the position of the playing media, prompting for a name.
+In a session buffer, bookmark its media, as \\[bookmark-set] does.
+Elsewhere, bookmark the media that is playing, read with completion
+if there are several."
+  (interactive)
+  (let ((buffer (if media-bookmark--session
+                    (current-buffer)
+                  (media-bookmark--read-session-buffer))))
+    (with-current-buffer buffer
+      (call-interactively #'bookmark-set)
+      (media-bookmark--redisplay media-bookmark--session))))
+
 (defvar-keymap media-bookmark-mode-map
   "SPC" #'media-bookmark-toggle-pause
+  "m" #'media-bookmark-set
   "f" #'media-bookmark-seek-forward
   "<right>" #'media-bookmark-seek-forward
   "b" #'media-bookmark-seek-backward
@@ -443,15 +536,32 @@ plays, that bookmark follows playback; see
 ;;;###autoload
 (defun media-bookmark-play (file)
   "Play FILE, a media file or URL, and show its session buffer.
-Interactively, with a prefix argument, read a URL.  In the session
-buffer, \\[bookmark-set] bookmarks the playback position."
+Interactively, with a prefix argument, read a URL.
+
+If `media-bookmark-auto-bookmark' is non-nil, resume FILE from its
+media bookmark, or bookmark it automatically if it has none.  In the
+session buffer, \\[bookmark-set] bookmarks the playback position."
   (interactive
    (list (if current-prefix-arg
              (read-string "Play URL: " (thing-at-point 'url))
            (read-file-name "Play file: " nil nil t))))
-  (pop-to-buffer
-   (media-bookmark--play (media-bookmark--normalize file)
-                         media-bookmark-backend nil)))
+  (let* ((file (media-bookmark--normalize file))
+         (buffer (media-bookmark--find-buffer file))
+         (bookmark (and media-bookmark-auto-bookmark
+                        (media-bookmark--find-bookmark file))))
+    (cond
+     ((and buffer (media-bookmark-session-live
+                   (buffer-local-value 'media-bookmark--session buffer)))
+      (pop-to-buffer buffer))
+     (bookmark
+      (bookmark-jump bookmark #'pop-to-buffer)
+      (message "Resuming \"%s\" at %s" (bookmark-name-from-full-record bookmark)
+               (media-bookmark--format-time
+                (or (bookmark-prop-get bookmark 'media-time) 0))))
+     (t
+      (pop-to-buffer
+       (media-bookmark--play file media-bookmark-backend nil
+                             media-bookmark-auto-bookmark))))))
 
 (provide 'media-bookmark)
 ;;; media-bookmark.el ends here

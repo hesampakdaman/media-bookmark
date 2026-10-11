@@ -260,6 +260,119 @@
   (should (equal (media-bookmark--format-time 65) "1:05"))
   (should (equal (media-bookmark--format-time 3725.4) "1:02:05")))
 
+;;;; Automatic bookmarks
+
+(defun media-bookmark-test--names ()
+  "Return the names of all bookmarks."
+  (mapcar #'car bookmark-alist))
+
+(ert-deftest media-bookmark-test-auto-create ()
+  "Automatic sessions are bookmarked when first saved, then updated."
+  (media-bookmark-test--with
+    (let* ((buffer (media-bookmark--play "/m/a.ogg" 'test nil t))
+           (session (media-bookmark-test--session buffer)))
+      (media-bookmark-update session :title "A song")
+      (media-bookmark-update session :time 40)
+      (should-not bookmark-alist)
+      (media-bookmark-update session :paused t)
+      (should (equal (media-bookmark-test--names) '("A song")))
+      (should (equal (media-bookmark-test--time "A song") 40))
+      (should (equal (buffer-local-value 'bookmark-current-bookmark buffer)
+                     "A song"))
+      (should (bookmark-prop-get "A song" 'last-modified))
+      (media-bookmark-update session :paused nil :time 70)
+      (media-bookmark-stopped session)
+      (should (equal (media-bookmark-test--names) '("A song")))
+      (should (equal (media-bookmark-test--time "A song") 70)))))
+
+(ert-deftest media-bookmark-test-auto-not-at-start ()
+  "Nothing is bookmarked at the start, or after playing to the end."
+  (media-bookmark-test--with
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--play "/m/a.ogg" 'test nil t))))
+      (media-bookmark-update session :time 0.3 :paused t)
+      (media-bookmark-update session :time 180)
+      (media-bookmark-stopped session t)
+      (should-not bookmark-alist))))
+
+(ert-deftest media-bookmark-test-auto-off ()
+  "Without AUTO, or with `media-bookmark-update-bookmarks' nil, nothing is created."
+  (media-bookmark-test--with
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--play "/m/a.ogg" 'test nil))))
+      (media-bookmark-update session :time 40 :paused t)
+      (should-not bookmark-alist))
+    (setq media-bookmark-update-bookmarks nil)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--play "/m/b.ogg" 'test nil t))))
+      (media-bookmark-update session :time 40 :paused t)
+      (should-not bookmark-alist))))
+
+(ert-deftest media-bookmark-test-auto-unique-name ()
+  "An automatic bookmark does not replace one of the same name."
+  (media-bookmark-test--with
+    (push '("a.ogg" (filename . "/elsewhere/a.ogg") (position . 1)) bookmark-alist)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--play "/m/a.ogg" 'test nil t))))
+      (media-bookmark-update session :time 40 :paused t)
+      (should (equal (media-bookmark-test--names) '("a.ogg<2>" "a.ogg")))
+      (should (equal (bookmark-get-filename "a.ogg") "/elsewhere/a.ogg")))))
+
+(ert-deftest media-bookmark-test-play-resumes ()
+  "`media-bookmark-play' resumes from the media's last modified bookmark."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "old" "/m/a.ogg" 10)
+    (bookmark-prop-set "old" 'last-modified '(1 0 0 0))
+    (media-bookmark-test--add "new" "/m/a.ogg" 30)
+    (bookmark-prop-set "new" 'last-modified '(2 0 0 0))
+    (bookmark-prop-set "old" 'last-modified '(0 5 0 0))
+    (media-bookmark-test--add "other" "/m/b.ogg" 50)
+    (media-bookmark-play "/m/a.ogg")
+    (should (equal media-bookmark-test--calls '((play "/m/a.ogg" 30))))
+    (should (equal bookmark-current-bookmark "new"))
+    (should (eq (current-buffer) (media-bookmark--find-buffer "/m/a.ogg")))
+    ;; Already playing: just show it.
+    (media-bookmark-play "/m/a.ogg")
+    (should (equal media-bookmark-test--calls '((play "/m/a.ogg" 30))))))
+
+(ert-deftest media-bookmark-test-play-new ()
+  "`media-bookmark-play' plays media without bookmarks automatically."
+  (media-bookmark-test--with
+    (media-bookmark-play "/m/a.ogg")
+    (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
+    (should (media-bookmark-session-auto media-bookmark--session))
+    (should (string-match-p "set when paused or stopped" (buffer-string)))))
+
+(ert-deftest media-bookmark-test-play-auto-bookmark-nil ()
+  "With `media-bookmark-auto-bookmark' nil, bookmarks are left alone."
+  (media-bookmark-test--with
+    (let ((media-bookmark-auto-bookmark nil))
+      (media-bookmark-test--add "a" "/m/a.ogg" 30)
+      (media-bookmark-play "/m/a.ogg")
+      (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
+      (should-not (media-bookmark-session-auto media-bookmark--session))
+      (should (string-match-p "C-x r m sets one\\|bookmark-set" (buffer-string))))))
+
+(ert-deftest media-bookmark-test-set-command ()
+  "`media-bookmark-set' bookmarks playing media from any buffer."
+  (media-bookmark-test--with
+    (should-error (media-bookmark-set) :type 'user-error)
+    (let* ((buffer (media-bookmark--play "/m/a.ogg" 'test nil))
+           (session (media-bookmark-test--session buffer)))
+      (media-bookmark-update session :time 61)
+      (with-current-buffer buffer
+        (should (string-match-p "m bookmark" (buffer-string))))
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'read-from-minibuffer)
+                   (lambda (&rest _) "manual")))
+          (media-bookmark-set)))
+      (should (equal (media-bookmark-test--time "manual") 61))
+      (should (eq (bookmark-get-handler "manual") 'media-bookmark-jump))
+      (should (equal (buffer-local-value 'bookmark-current-bookmark buffer)
+                     "manual"))
+      (with-current-buffer buffer
+        (should (string-match-p "Bookmark  manual" (buffer-string)))))))
+
 ;;;; mpv
 
 (defvar media-bookmark-test--media nil
