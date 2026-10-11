@@ -557,12 +557,15 @@
            (media-bookmark-mpv-sockets nil)
            (file (media-bookmark--normalize (media-bookmark-test--media)))
            (process (media-bookmark-test--external-mpv socket file))
-           (player (cl-find socket (media-bookmark--players)
+           (find (lambda ()
+                   (cl-find socket (media-bookmark--players)
                             :key (lambda (p) (plist-get p :handle))
                             :test #'equal)))
+           player)
       (unwind-protect
           (progn
-            (should player)
+            ;; mpv has no path until it has opened the file.
+            (media-bookmark-test--wait (lambda () (setq player (funcall find))))
             (should (equal (media-bookmark--normalize (plist-get player :file))
                            file))
             (media-bookmark-attach player)
@@ -571,9 +574,7 @@
               (media-bookmark-test--wait
                (lambda () (> (media-bookmark-session-time session) 0.5)))
               ;; Our own session is not offered again.
-              (should-not (cl-find socket (media-bookmark--players)
-                                   :key (lambda (p) (plist-get p :handle))
-                                   :test #'equal))
+              (should-not (funcall find))
               (kill-buffer buffer)
               (should (equal (media-bookmark-test--time
                               (file-name-nondirectory file))
@@ -581,10 +582,7 @@
               (accept-process-output nil 0.3)
               (should (process-live-p process))
               ;; Attach again, then quit the player itself.
-              (media-bookmark-attach
-               (cl-find socket (media-bookmark--players)
-                        :key (lambda (p) (plist-get p :handle))
-                        :test #'equal))
+              (media-bookmark-attach (funcall find))
               (setq buffer (current-buffer))
               (media-bookmark-stop)
               (media-bookmark-test--wait (lambda () (not (process-live-p process))))
