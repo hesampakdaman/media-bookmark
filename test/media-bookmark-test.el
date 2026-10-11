@@ -340,6 +340,38 @@
       (should (equal (media-bookmark-session-title session) "A"))
       (should (equal (media-bookmark-test--time "a") 30)))))
 
+;;;; Bookmarking from the player
+
+(ert-deftest media-bookmark-test-requested-new ()
+  "A request from the player bookmarks the media under its title."
+  (media-bookmark-test--with
+    (push '("Song" (filename . "/elsewhere") (position . 1)) bookmark-alist)
+    (let* ((buffer (media-bookmark--play "/m/a.ogg" 'test nil))
+           (session (media-bookmark-test--session buffer)))
+      (media-bookmark-update session :title "Song" :time 65.2)
+      (should (equal (media-bookmark-bookmark-requested session)
+                     "Bookmarked \"Song<2>\" at 1:05"))
+      (should (equal (media-bookmark-test--time "Song<2>") 65))
+      (should (equal (buffer-local-value 'bookmark-current-bookmark buffer)
+                     "Song<2>"))
+      (should (string-match-p "Bookmark  Song<2>"
+                              (with-current-buffer buffer (buffer-string)))))))
+
+(ert-deftest media-bookmark-test-requested-existing ()
+  "A request updates the session's bookmark, even if bookmarks stay put."
+  (media-bookmark-test--with
+    (setq media-bookmark-update-bookmarks nil)
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--find-buffer "/m/a.ogg"))))
+      (media-bookmark-update session :time 90 :paused t)
+      (should (equal (media-bookmark-test--time "a") 30))
+      (should (equal (media-bookmark-bookmark-requested session)
+                     "Bookmarked \"a\" at 1:30"))
+      (should (equal (media-bookmark-test--time "a") 90))
+      (should (equal (mapcar #'car bookmark-alist) '("a"))))))
+
 ;;;; Closing and attaching
 
 (ert-deftest media-bookmark-test-close-stopped-only ()
@@ -772,6 +804,36 @@
               (should (<= 7 (media-bookmark-test--time "long") 10))
               (should (equal (media-bookmark-test--time "short") 0))))
         (delete-process process)))))
+
+(ert-deftest media-bookmark-test-mpv-key ()
+  "Ctrl+b in mpv, with the mpv script, bookmarks what it plays."
+  (media-bookmark-test--with-mpv
+    (let* ((file (media-bookmark--normalize (media-bookmark-test--media)))
+           (log (expand-file-name "mpv.log" dir))
+           (media-bookmark-mpv-arguments
+            (append media-bookmark-mpv-arguments
+                    (list "-v" (concat "--log-file=" log)
+                          (concat "--script="
+                                  (expand-file-name "mpv/media-bookmark.lua"
+                                                    media-bookmark-mpv--directory)))))
+           (buffer (media-bookmark--play file 'mpv 4))
+           (session (media-bookmark-test--session buffer))
+           (mpv (media-bookmark-session-data session)))
+      (media-bookmark-test--wait
+       (lambda () (>= (media-bookmark-session-time session) 4.5)))
+      (media-bookmark-mpv--send mpv "keypress" "ctrl+b")
+      (let ((name (file-name-nondirectory file)))
+        (media-bookmark-test--wait (lambda () (bookmark-get-bookmark name t)))
+        (should (<= 4 (media-bookmark-test--time name) 7))
+        (should (equal (buffer-local-value 'bookmark-current-bookmark buffer)
+                       name))
+        ;; The script got the answer, and shows it in mpv.
+        (media-bookmark-test--wait
+         (lambda ()
+           (with-temp-buffer
+             (insert-file-contents log)
+             (search-forward (format "[media_bookmark] Bookmarked \"%s\"" name)
+                             nil t))))))))
 
 (ert-deftest media-bookmark-test-mpv-two-players ()
   "Quitting one of two players closes only its session."
