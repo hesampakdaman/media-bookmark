@@ -12,7 +12,9 @@ Players are pluggable backends.  [[https://mpv.io][mpv]] is included.
 
 * Installation
 
-Requires Emacs 29.1 or later, and for the included backend, mpv.
+Requires Emacs 29.1 or later, and for the included backend, mpv.  The
+package includes an mpv script, =mpv/media-bookmark.lua=; see
+[[*Players started outside Emacs]].
 
 #+begin_src emacs-lisp
 (use-package media-bookmark
@@ -70,16 +72,26 @@ can control, and follows the one you pick as if Emacs had started it,
 without changing its position.  Killing its session buffer stops
 following it but leaves it playing.
 
-Emacs controls mpv through its IPC socket, so mpv must have one: start
-it with =--input-ipc-server=PATH=, or set =input-ipc-server= in
-=mpv.conf=, for example:
+Emacs controls mpv through an IPC socket, which mpv only opens when
+told to.  The simplest way is to install the included mpv script once:
 
 #+begin_example
-input-ipc-server=~~/socket
+M-x media-bookmark-mpv-install-script
 #+end_example
 
-Sockets of running mpv processes and the one in =mpv.conf= are found
-automatically; list others in =media-bookmark-mpv-sockets=.
+It copies =mpv/media-bookmark.lua= to mpv's =scripts= directory.  From
+then on, every mpv gets its own socket, however it was started (from a
+terminal, a file manager, ...), in =media-bookmark-mpv-socket-directory=,
+where =media-bookmark-attach= looks.  Players already running when you
+install it need a restart.
+
+Without the script, mpv players are also found by:
+
+- =--input-ipc-server=PATH= on their command line;
+- =input-ipc-server= in =mpv.conf=, for example =input-ipc-server=~~/socket=.
+  All mpv players then share that socket, so only the latest can be
+  attached to;
+- =media-bookmark-mpv-sockets=, a list of socket files.
 
 ** Where the session buffer is shown
 
@@ -110,6 +122,7 @@ shows:
 | =media-bookmark-mpv-program=            | ="mpv"= | mpv executable                             |
 | =media-bookmark-mpv-arguments=          | =nil=   | extra mpv arguments, such as ="--fs"=      |
 | =media-bookmark-mpv-sockets=            | =nil=   | more sockets of mpv players to attach to   |
+| =media-bookmark-mpv-socket-directory=   |         | where the mpv script puts its sockets      |
 
 A bookmark remembers its backend, so changing =media-bookmark-backend=
 affects new playback only.

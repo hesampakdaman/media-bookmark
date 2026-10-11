@@ -75,6 +75,14 @@
        (dolist (buffer (buffer-list))
          (when (buffer-local-value 'media-bookmark--session buffer)
            (kill-buffer buffer)))
+       ;; Let mpv sentinels run, which delete their sockets.
+       (let ((deadline (+ (float-time) 5)))
+         (while (and (< (float-time) deadline)
+                     (cl-find-if (lambda (process)
+                                   (string-prefix-p "media-bookmark-mpv"
+                                                    (process-name process)))
+                                 (process-list)))
+           (accept-process-output nil 0.05)))
        (delete-directory dir t))))
 
 (defun media-bookmark-test--session (buffer)
@@ -617,6 +625,50 @@
             (should (member (expand-file-name "b.sock" home) sockets))
             (should (member (expand-file-name "socket" home) sockets))))
       (delete-directory home t))))
+
+(ert-deftest media-bookmark-test-mpv-script ()
+  "With the mpv script, any mpv can be attached to."
+  (media-bookmark-test--with-mpv
+    (let* ((process-environment (cons (concat "XDG_RUNTIME_DIR=" dir)
+                                      process-environment))
+           (media-bookmark-mpv-socket-directory
+            (expand-file-name "mpv-sockets" dir))
+           (file (media-bookmark--normalize (media-bookmark-test--media)))
+           (process (start-process
+                     "external-mpv" nil "mpv" "--no-config" "--ao=null"
+                     "--vo=null"
+                     (concat "--script="
+                             (expand-file-name "mpv/media-bookmark.lua"
+                                               media-bookmark-mpv--directory))
+                     (expand-file-name file))))
+      (set-process-query-on-exit-flag process nil)
+      (unwind-protect
+          (let ((player (media-bookmark-test--wait
+                         (lambda ()
+                           (cl-find (format "%s/%d" media-bookmark-mpv-socket-directory
+                                            (process-id process))
+                                    (media-bookmark--players)
+                                    :key (lambda (p) (plist-get p :handle))
+                                    :test #'equal)))))
+            (media-bookmark-attach player)
+            (media-bookmark-stop)
+            (media-bookmark-test--wait (lambda () (not (process-live-p process))))
+            ;; The script removes its socket when mpv quits.
+            (media-bookmark-test--wait
+             (lambda () (not (file-exists-p (plist-get player :handle))))))
+        (delete-process process)))))
+
+(ert-deftest media-bookmark-test-mpv-socket-directory ()
+  "Sockets in `media-bookmark-mpv-socket-directory' are candidates."
+  (let* ((media-bookmark-mpv-socket-directory
+          (make-temp-file "media-bookmark-test-sockets-" t))
+         (media-bookmark-mpv-sockets nil))
+    (unwind-protect
+        (progn
+          (write-region "" nil (expand-file-name "123" media-bookmark-mpv-socket-directory))
+          (should (member (expand-file-name "123" media-bookmark-mpv-socket-directory)
+                          (media-bookmark-mpv--sockets))))
+      (delete-directory media-bookmark-mpv-socket-directory t))))
 
 (ert-deftest media-bookmark-test-mpv-two-players ()
   "Quitting one of two players closes only its session."

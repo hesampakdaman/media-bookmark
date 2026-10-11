@@ -36,11 +36,26 @@
   "Extra command-line arguments for mpv."
   :type '(repeat string))
 
+(defconst media-bookmark-mpv--directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "The directory of this library, with the mpv script in mpv/.")
+
+(defcustom media-bookmark-mpv-socket-directory
+  (expand-file-name "mpv-sockets" (or (getenv "XDG_RUNTIME_DIR")
+                                      (getenv "TMPDIR")
+                                      "/tmp"))
+  "Directory of the IPC sockets made by the media-bookmark mpv script.
+The script, which `media-bookmark-mpv-install-script' installs, gives
+each mpv a socket here, where `media-bookmark-attach' finds it.  It
+must match the directory in the script."
+  :type 'directory)
+
 (defcustom media-bookmark-mpv-sockets nil
   "IPC sockets of mpv players started outside Emacs.
-`media-bookmark-attach' looks for players at these sockets, at those
-given to running mpv processes with --input-ipc-server, and at the
-one set by input-ipc-server in mpv.conf."
+`media-bookmark-attach' looks for players at these sockets, in
+`media-bookmark-mpv-socket-directory', at those given to running mpv
+processes with --input-ipc-server, and at the one set by
+input-ipc-server in mpv.conf."
   :type '(repeat file))
 
 (cl-defstruct (media-bookmark-mpv--state
@@ -188,6 +203,10 @@ For our own mpv, its process sentinel stops SESSION instead."
   "Return the IPC sockets where mpv players started outside Emacs may be."
   (let ((sockets (mapcar #'media-bookmark-mpv--expand media-bookmark-mpv-sockets))
         (config (expand-file-name "mpv.conf" (media-bookmark-mpv--config-directory))))
+    (when (file-directory-p media-bookmark-mpv-socket-directory)
+      (dolist (socket (directory-files media-bookmark-mpv-socket-directory
+                                       t "\\`[^.]"))
+        (push socket sockets)))
     (dolist (pid (list-system-processes))
       (let* ((attributes (process-attributes pid))
              (args (alist-get 'args attributes)))
@@ -249,6 +268,22 @@ Return nil if no mpv answers there within a second."
               (cl-loop for id from 1 to (length properties)
                        collect (gethash id replies))))
         (delete-process connection)))))
+
+;;;###autoload
+(defun media-bookmark-mpv-install-script ()
+  "Install the mpv script that lets `media-bookmark-attach' find mpv.
+Copy media-bookmark.lua to mpv's scripts directory.  With it, each
+mpv started afterwards gets an IPC socket in
+`media-bookmark-mpv-socket-directory'."
+  (interactive)
+  (let ((source (expand-file-name "mpv/media-bookmark.lua"
+                                  media-bookmark-mpv--directory))
+        (target (expand-file-name "scripts/media-bookmark.lua"
+                                  (media-bookmark-mpv--config-directory))))
+    (make-directory (file-name-directory target) t)
+    (copy-file source target t)
+    (message "Installed %s; mpv players started from now on can be attached to"
+             (abbreviate-file-name target))))
 
 (cl-defmethod media-bookmark-backend-players ((_backend (eql 'mpv)))
   "Return the mpv players started outside Emacs that can be attached to."
