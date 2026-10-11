@@ -62,8 +62,11 @@ input-ipc-server in mpv.conf."
                (:constructor media-bookmark-mpv--make-state)
                (:copier nil))
   "State of an mpv process and its IPC connection.
-PROCESS is nil for an mpv started outside Emacs."
-  process connection socket (pending "") finished)
+PROCESS is nil for an mpv started outside Emacs.  DIRECTORY is mpv's
+working directory, against which it reports relative file names.
+LOADING is non-nil while mpv loads a file, when it cannot seek yet;
+SEEK is then the position to seek to once it has loaded."
+  process connection socket (pending "") finished directory loading seek)
 
 (defun media-bookmark-mpv--send (mpv &rest command)
   "Send COMMAND, a list of strings and numbers, to MPV."
@@ -124,7 +127,10 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
                            (media-bookmark-mpv--filter session mpv string))))
           ;; The quit command closes the socket before we could ask
           ;; for the position, so follow the position as it changes.
-          (cl-loop for property in '("time-pos" "duration" "pause" "media-title")
+          ;; mpv reports changes in this order, so the working
+          ;; directory and file come before the rest for that file.
+          (cl-loop for property in '("working-directory" "path" "time-pos"
+                                     "duration" "pause" "media-title")
                    for id from 1
                    do (media-bookmark-mpv--send mpv "observe_property" id property)))
       (file-error
@@ -153,13 +159,31 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
     ("property-change"
      (let ((data (plist-get message :data)))
        (pcase (plist-get message :name)
+         ("working-directory"
+          (setf (media-bookmark-mpv--state-directory mpv) data))
+         ("path"
+          (when data
+            (media-bookmark-switched
+             session
+             (if (media-bookmark-url-p data)
+                 data
+               (expand-file-name data (media-bookmark-mpv--state-directory mpv)))
+             (media-bookmark-mpv--state-finished mpv))
+            (setf (media-bookmark-mpv--state-finished mpv) nil)))
          ("time-pos" (when data (media-bookmark-update session :time data)))
          ("duration" (when data (media-bookmark-update session :duration data)))
          ("pause" (media-bookmark-update session :paused data))
          ("media-title" (when data (media-bookmark-update session :title data))))))
     ("end-file"
      (when (equal (plist-get message :reason) "eof")
-       (setf (media-bookmark-mpv--state-finished mpv) t)))))
+       (setf (media-bookmark-mpv--state-finished mpv) t)))
+    ("start-file"
+     (setf (media-bookmark-mpv--state-loading mpv) t))
+    ("file-loaded"
+     (setf (media-bookmark-mpv--state-loading mpv) nil)
+     (when-let* ((time (media-bookmark-mpv--state-seek mpv)))
+       (setf (media-bookmark-mpv--state-seek mpv) nil)
+       (media-bookmark-mpv--send mpv "seek" time "absolute")))))
 
 (defun media-bookmark-mpv--sentinel (session mpv process)
   "Clean up after PROCESS, the mpv of MPV, exits, and stop SESSION."
@@ -331,8 +355,10 @@ mpv started afterwards gets an IPC socket in
 
 (cl-defmethod media-bookmark-backend-seek ((_backend (eql 'mpv)) session time)
   "Seek mpv playing SESSION to TIME."
-  (media-bookmark-mpv--send (media-bookmark-session-data session)
-                            "seek" time "absolute"))
+  (let ((mpv (media-bookmark-session-data session)))
+    (if (media-bookmark-mpv--state-loading mpv)
+        (setf (media-bookmark-mpv--state-seek mpv) time)
+      (media-bookmark-mpv--send mpv "seek" time "absolute"))))
 
 (cl-defmethod media-bookmark-backend-toggle-pause ((_backend (eql 'mpv)) session)
   "Pause or resume mpv playing SESSION."

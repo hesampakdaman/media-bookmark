@@ -283,6 +283,63 @@
   (should (equal (media-bookmark--format-time 65) "1:05"))
   (should (equal (media-bookmark--format-time 3725.4) "1:02:05")))
 
+;;;; Playlists
+
+(ert-deftest media-bookmark-test-switched ()
+  "Moving to other media saves the old bookmark and resumes the new one."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (media-bookmark-test--add "b" "/m/b.ogg" 75)
+    (bookmark-jump "a" #'ignore)
+    (let* ((buffer (media-bookmark--find-buffer "/m/a.ogg"))
+           (session (media-bookmark-test--session buffer)))
+      (media-bookmark-update session :time 44 :title "A" :duration 100)
+      (media-bookmark-switched session "/m/b.ogg")
+      (should (equal (media-bookmark-test--time "a") 44))
+      (should (equal (media-bookmark-session-file session) "/m/b.ogg"))
+      (should-not (media-bookmark-session-title session))
+      (should-not (media-bookmark-session-duration session))
+      (should (equal (media-bookmark-session-time session) 75))
+      (should (equal (car media-bookmark-test--calls) '(seek 75)))
+      (should (equal (buffer-local-value 'bookmark-current-bookmark buffer) "b"))
+      (should (equal (buffer-name buffer) "*media: b.ogg*"))
+      (should (eq (media-bookmark--find-buffer "/m/b.ogg") buffer))
+      ;; The new media's bookmark now follows playback, not the old one.
+      (media-bookmark-update session :time 80 :paused t)
+      (should (equal (media-bookmark-test--time "b") 80))
+      (should (equal (media-bookmark-test--time "a") 44)))))
+
+(ert-deftest media-bookmark-test-switched-finished ()
+  "Media played to the end is rewound; media without a bookmark gets none."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let* ((buffer (media-bookmark--find-buffer "/m/a.ogg"))
+           (session (media-bookmark-test--session buffer)))
+      (setq media-bookmark-test--calls nil)
+      (media-bookmark-update session :time 99)
+      (media-bookmark-switched session "/m/c.ogg" t)
+      (should (equal (media-bookmark-test--time "a") 0))
+      (should-not (buffer-local-value 'bookmark-current-bookmark buffer))
+      (should (equal (media-bookmark-session-time session) 0))
+      (should-not media-bookmark-test--calls)
+      (media-bookmark-update session :time 12 :paused t)
+      (should (equal (media-bookmark-test--time "a") 0))
+      (should (equal (mapcar #'car bookmark-alist) '("a"))))))
+
+(ert-deftest media-bookmark-test-switched-same ()
+  "Reporting the media already playing changes nothing."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (bookmark-jump "a" #'ignore)
+    (let ((session (media-bookmark-test--session
+                    (media-bookmark--find-buffer "/m/a.ogg"))))
+      (media-bookmark-update session :time 40 :title "A")
+      (media-bookmark-switched session "/m/../m/a.ogg")
+      (should (equal (media-bookmark-session-time session) 40))
+      (should (equal (media-bookmark-session-title session) "A"))
+      (should (equal (media-bookmark-test--time "a") 30)))))
+
 ;;;; Closing and attaching
 
 (ert-deftest media-bookmark-test-close-stopped-only ()
@@ -461,19 +518,21 @@
 ;;;; mpv
 
 (defvar media-bookmark-test--media nil
-  "A 20-second tone, encoded by mpv for the mpv tests.")
+  "Alist of (SECONDS . FILE), tones encoded by mpv for the mpv tests.")
 
-(defun media-bookmark-test--media ()
-  "Return `media-bookmark-test--media', encoding it first if needed."
-  (unless (and media-bookmark-test--media
-               (file-exists-p media-bookmark-test--media))
-    (let ((file (make-temp-file "media-bookmark-test-" nil ".ogg")))
-      (should (zerop (call-process "mpv" nil nil nil "--no-config"
-                                   "--really-quiet"
-                                   "av://lavfi:sine=frequency=440:duration=20"
-                                   (concat "--o=" file))))
-      (setq media-bookmark-test--media file)))
-  media-bookmark-test--media)
+(defun media-bookmark-test--media (&optional seconds)
+  "Return a tone of SECONDS, 20 by default, encoding it first if needed."
+  (let* ((seconds (or seconds 20))
+         (file (alist-get seconds media-bookmark-test--media)))
+    (unless (and file (file-exists-p file))
+      (setq file (make-temp-file (format "media-bookmark-test-%ss-" seconds)
+                                 nil ".ogg"))
+      (should (zerop (call-process
+                      "mpv" nil nil nil "--no-config" "--really-quiet"
+                      (format "av://lavfi:sine=frequency=440:duration=%s" seconds)
+                      (concat "--o=" file))))
+      (setf (alist-get seconds media-bookmark-test--media) file))
+    file))
 
 (defun media-bookmark-test--wait (predicate)
   "Wait up to 10 seconds for PREDICATE to return non-nil, and return that."
@@ -551,12 +610,12 @@
       (kill-buffer buffer)
       (media-bookmark-test--wait (lambda () (not (process-live-p process)))))))
 
-(defun media-bookmark-test--external-mpv (socket file)
-  "Start an mpv outside media-bookmark on FILE, with IPC at SOCKET."
-  (let ((process (start-process "external-mpv" nil "mpv" "--no-config"
-                                "--ao=null" "--vo=null"
-                                (concat "--input-ipc-server=" socket)
-                                (expand-file-name file))))
+(defun media-bookmark-test--external-mpv (socket &rest files)
+  "Start an mpv outside media-bookmark on FILES, with IPC at SOCKET."
+  (let ((process (apply #'start-process "external-mpv" nil "mpv" "--no-config"
+                        "--ao=null" "--vo=null"
+                        (concat "--input-ipc-server=" socket)
+                        (mapcar #'expand-file-name files))))
     (set-process-query-on-exit-flag process nil)
     (media-bookmark-test--wait (lambda () (file-exists-p socket)))
     process))
@@ -669,6 +728,50 @@
           (should (member (expand-file-name "123" media-bookmark-mpv-socket-directory)
                           (media-bookmark-mpv--sockets))))
       (delete-directory media-bookmark-mpv-socket-directory t))))
+
+(ert-deftest media-bookmark-test-mpv-playlist ()
+  "A session follows mpv through a playlist, bookmark by bookmark."
+  (media-bookmark-test--with-mpv
+    (let* ((short (media-bookmark--normalize (media-bookmark-test--media 1.5)))
+           (long (media-bookmark--normalize (media-bookmark-test--media)))
+           (socket (expand-file-name "playlist.sock" dir))
+           (media-bookmark-mpv-sockets nil)
+           (process (media-bookmark-test--external-mpv socket short long)))
+      (unwind-protect
+          (progn
+            (push `("short" (filename . ,short) (media-time . 1)
+                    (media-backend . mpv) (handler . media-bookmark-jump))
+                  bookmark-alist)
+            (push `("long" (filename . ,long) (media-time . 7)
+                    (media-backend . mpv) (handler . media-bookmark-jump))
+                  bookmark-alist)
+            (media-bookmark-attach
+             (media-bookmark-test--wait
+              (lambda ()
+                (cl-find socket (media-bookmark--players)
+                         :key (lambda (p) (plist-get p :handle))
+                         :test #'equal))))
+            (let ((buffer (current-buffer))
+                  (session media-bookmark--session))
+              (should (equal bookmark-current-bookmark "short"))
+              ;; The short tone ends, and mpv plays the long one from
+              ;; its bookmark.
+              (media-bookmark-test--wait
+               (lambda () (equal (media-bookmark-session-file session) long)))
+              (should (equal (media-bookmark-test--time "short") 0))
+              (should (equal (buffer-local-value 'bookmark-current-bookmark buffer)
+                             "long"))
+              ;; Resumed, not played from the start up to there.
+              (let ((switched (float-time)))
+                (media-bookmark-test--wait
+                 (lambda () (>= (media-bookmark-session-time session) 7.5)))
+                (should (< (- (float-time) switched) 3)))
+              (with-current-buffer buffer
+                (media-bookmark-stop))
+              (media-bookmark-test--wait (lambda () (not (process-live-p process))))
+              (should (<= 7 (media-bookmark-test--time "long") 10))
+              (should (equal (media-bookmark-test--time "short") 0))))
+        (delete-process process)))))
 
 (ert-deftest media-bookmark-test-mpv-two-players ()
   "Quitting one of two players closes only its session."
