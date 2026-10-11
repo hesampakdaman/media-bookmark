@@ -17,18 +17,26 @@ Requires Emacs 29.1 or later, and mpv.  The mpv backend talks to mpv
 through Unix sockets, so it works on GNU/Linux and other Unix-like
 systems, but not on Windows.
 
-With Emacs 30 or later:
+A sensible configuration, for Emacs 30 or later:
 
 #+begin_src emacs-lisp
 (use-package media-bookmark
-  :vc (:url "https://github.com/hesampakdaman/media-bookmark"))
+  :vc (:url "https://github.com/hesampakdaman/media-bookmark")
+  :bind (("C-c m p" . media-bookmark-play)    ; play a file, resuming if bookmarked
+         ("C-c m a" . media-bookmark-attach)  ; follow an mpv started elsewhere
+         ("C-c m m" . media-bookmark-set))    ; bookmark what is playing
+  ;; :custom
+  ;; (media-bookmark-auto-bookmark t)              ; bookmark without pressing m
+  ;; (media-bookmark-kill-buffer-when-stopped nil) ; keep the buffer when mpv quits
+  )
 #+end_src
 
-With Emacs 29, =M-x package-vc-install RET
-https://github.com/hesampakdaman/media-bookmark RET=.
+Then, once, =M-x media-bookmark-mpv-install-script=, so that any mpv can
+be followed, however it was started; see [[*Players started outside Emacs]].
 
-To follow mpv players started outside Emacs, also install the
-included mpv script once; see [[*Players started outside Emacs]].
+With Emacs 29, first =M-x package-vc-install RET
+https://github.com/hesampakdaman/media-bookmark RET=, then use the same
+configuration without the =:vc= line.
 
 * Quick start
 
