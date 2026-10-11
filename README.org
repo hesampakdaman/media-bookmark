@@ -22,28 +22,31 @@ Requires Emacs 29.1 or later, and for the included backend, mpv.
 * Usage
 
 - =M-x media-bookmark-play= plays a file (with =C-u=, a URL) and shows
-  its session buffer.  The media is bookmarked automatically, under its
-  title, when you first pause or stop it; playing it again resumes from
-  that bookmark.
+  its session buffer.  If the media has a bookmark, it resumes from it.
+- =m= in the session buffer (or =C-x r m= there), or
+  =M-x media-bookmark-set= from any buffer, bookmarks the position.
+  The default name is the media's title.
 - =C-x r b= (=bookmark-jump=) or =C-x r l= (=bookmark-bmenu-list=)
   resumes media from anywhere.  Media bookmarks are listed with type
   "Media".
-- To add a bookmark of your own, such as a favourite scene, press =m=
-  in the session buffer (or =C-x r m= there), or =M-x media-bookmark-set=
-  from any buffer.
+- =M-x media-bookmark-attach= follows an mpv started outside Emacs; see
+  [[*Players started outside Emacs]].
 
 In the session buffer:
 
-| Key            | Command                         |
-|----------------+---------------------------------|
-| =SPC=          | pause, resume, or play again    |
-| =m=            | bookmark the position           |
-| =f= / =<right>= | seek forward                    |
-| =b= / =<left>=  | seek backward                   |
-| =s=            | quit the player                 |
-| =q=            | quit the window                 |
+| Key             | Command                       |
+|-----------------+-------------------------------|
+| =SPC=           | pause or resume               |
+| =m=             | bookmark the position         |
+| =f= / =<right>= | seek forward                  |
+| =b= / =<left>=  | seek backward                 |
+| =s=             | quit the player               |
+| =q=             | quit the window               |
 
-Killing the session buffer quits the player.
+When the player quits, its session buffer closes; other sessions are
+left alone.  Set =media-bookmark-kill-buffer-when-stopped= to nil to
+keep it, so that you can seek and press =SPC= to play again.  Killing
+the session buffer quits the player.
 
 ** How bookmarks are updated
 
@@ -55,26 +58,58 @@ bookmarks are written to disk according to =bookmark-save-flag=, as
 with =bookmark-set=.
 
 Media played to the end is bookmarked at the start; see
-=media-bookmark-rewind-when-finished=.  To bookmark media only with =m=
-or =C-x r m=, set =media-bookmark-auto-bookmark= to nil; to also stop
-bookmarks from following playback, set =media-bookmark-update-bookmarks=
-to nil.
+=media-bookmark-rewind-when-finished=.  To have media bookmarked without
+=m=, the first time it is paused or stopped, set
+=media-bookmark-auto-bookmark= to t.  To keep bookmarks where you set
+them, set =media-bookmark-update-bookmarks= to nil.
 
-Playback must be started from Emacs (=media-bookmark-play= or a
-bookmark jump), so that Emacs can follow the player.
+** Players started outside Emacs
+
+=M-x media-bookmark-attach= lists the running mpv players that Emacs
+can control, and follows the one you pick as if Emacs had started it,
+without changing its position.  Killing its session buffer stops
+following it but leaves it playing.
+
+Emacs controls mpv through its IPC socket, so mpv must have one: start
+it with =--input-ipc-server=PATH=, or set =input-ipc-server= in
+=mpv.conf=, for example:
+
+#+begin_example
+input-ipc-server=~~/socket
+#+end_example
+
+Sockets of running mpv processes and the one in =mpv.conf= are found
+automatically; list others in =media-bookmark-mpv-sockets=.
+
+** Where the session buffer is shown
+
+The session buffer is shown with =pop-to-buffer=, so
+=display-buffer-alist= decides where.  For example, to show it in a
+side window at the bottom, which =window-toggle-side-windows= hides and
+shows:
+
+#+begin_src emacs-lisp
+(add-to-list 'display-buffer-alist
+             '("\\`\\*media: "
+               (display-buffer-in-side-window)
+               (side . bottom)
+               (window-height . fit-window-to-buffer)))
+#+end_src
 
 * Options
 
-| Option                               | Default | Meaning                                      |
-|--------------------------------------+---------+----------------------------------------------|
-| =media-bookmark-backend=             | =mpv=   | player for =media-bookmark-play=             |
-| =media-bookmark-backends=            |         | available backends and their libraries       |
-| =media-bookmark-auto-bookmark=       | =t=     | bookmark and resume automatically            |
-| =media-bookmark-update-bookmarks=    | =t=     | bookmarks follow playback                    |
-| =media-bookmark-rewind-when-finished= | =t=     | finished media is bookmarked at the start    |
-| =media-bookmark-seek-step=           | =10=    | seconds per seek                             |
-| =media-bookmark-mpv-program=         | ="mpv"= | mpv executable                               |
-| =media-bookmark-mpv-arguments=       | =nil=   | extra mpv arguments, such as ="--fs"=        |
+| Option                                  | Default | Meaning                                    |
+|-----------------------------------------+---------+--------------------------------------------|
+| =media-bookmark-backend=                | =mpv=   | player for =media-bookmark-play=           |
+| =media-bookmark-backends=               |         | available backends and their libraries     |
+| =media-bookmark-auto-bookmark=          | =nil=   | bookmark media automatically               |
+| =media-bookmark-update-bookmarks=       | =t=     | bookmarks follow playback                  |
+| =media-bookmark-rewind-when-finished=   | =t=     | finished media is bookmarked at the start  |
+| =media-bookmark-kill-buffer-when-stopped= | =t=   | close the session buffer when its player quits |
+| =media-bookmark-seek-step=              | =10=    | seconds per seek                           |
+| =media-bookmark-mpv-program=            | ="mpv"= | mpv executable                             |
+| =media-bookmark-mpv-arguments=          | =nil=   | extra mpv arguments, such as ="--fs"=      |
+| =media-bookmark-mpv-sockets=            | =nil=   | more sockets of mpv players to attach to   |
 
 A bookmark remembers its backend, so changing =media-bookmark-backend=
 affects new playback only.
@@ -139,6 +174,12 @@ on first use:
 (add-to-list 'media-bookmark-backends '(vlc . media-bookmark-vlc))
 (setopt media-bookmark-backend 'vlc)
 #+end_src
+
+To support =media-bookmark-attach=, also implement
+=media-bookmark-backend-players=, which returns the running players the
+backend can connect to, =media-bookmark-backend-attach=, which follows
+one, and =media-bookmark-backend-detach=, which stops following it
+without quitting it.  These are optional.
 
 Backends contributed to this repository are added to the default of
 =media-bookmark-backends=.  The tests in =test/media-bookmark-test.el=

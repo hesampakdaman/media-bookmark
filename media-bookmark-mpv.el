@@ -36,10 +36,18 @@
   "Extra command-line arguments for mpv."
   :type '(repeat string))
 
+(defcustom media-bookmark-mpv-sockets nil
+  "IPC sockets of mpv players started outside Emacs.
+`media-bookmark-attach' looks for players at these sockets, at those
+given to running mpv processes with --input-ipc-server, and at the
+one set by input-ipc-server in mpv.conf."
+  :type '(repeat file))
+
 (cl-defstruct (media-bookmark-mpv--state
                (:constructor media-bookmark-mpv--make-state)
                (:copier nil))
-  "State of an mpv process and its IPC connection."
+  "State of an mpv process and its IPC connection.
+PROCESS is nil for an mpv started outside Emacs."
   process connection socket (pending "") finished)
 
 (defun media-bookmark-mpv--send (mpv &rest command)
@@ -83,7 +91,8 @@
   "Connect to the IPC socket of MPV, playing SESSION.
 mpv creates the socket shortly after it starts, so retry TRIES times."
   (when (and (eq mpv (media-bookmark-session-data session))
-             (process-live-p (media-bookmark-mpv--state-process mpv)))
+             (let ((process (media-bookmark-mpv--state-process mpv)))
+               (or (null process) (process-live-p process))))
     (condition-case nil
         (progn
           (setf (media-bookmark-mpv--state-connection mpv)
@@ -93,7 +102,9 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
                  :service (media-bookmark-mpv--state-socket mpv)
                  :coding 'utf-8
                  :noquery t
-                 :sentinel #'ignore
+                 :sentinel (lambda (connection _event)
+                             (media-bookmark-mpv--connection-sentinel
+                              session mpv connection))
                  :filter (lambda (_process string)
                            (media-bookmark-mpv--filter session mpv string))))
           ;; The quit command closes the socket before we could ask
@@ -152,6 +163,137 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
     (when (eq mpv (media-bookmark-session-data session))
       (media-bookmark-stopped session (media-bookmark-mpv--state-finished mpv)))))
 
+(defun media-bookmark-mpv--connection-sentinel (session mpv connection)
+  "Stop SESSION when CONNECTION to MPV closes, if mpv is not ours.
+For our own mpv, its process sentinel stops SESSION instead."
+  (unless (or (process-live-p connection)
+              (media-bookmark-mpv--state-process mpv))
+    (when (eq mpv (media-bookmark-session-data session))
+      (media-bookmark-stopped session (media-bookmark-mpv--state-finished mpv)))))
+
+;;;; Players started outside Emacs
+
+(defun media-bookmark-mpv--config-directory ()
+  "Return mpv's configuration directory."
+  (or (getenv "MPV_HOME")
+      (expand-file-name "mpv" (or (getenv "XDG_CONFIG_HOME") "~/.config"))))
+
+(defun media-bookmark-mpv--expand (file)
+  "Expand FILE as mpv does, where ~~/ is mpv's configuration directory."
+  (if (string-prefix-p "~~/" file)
+      (expand-file-name (substring file 3) (media-bookmark-mpv--config-directory))
+    (expand-file-name file)))
+
+(defun media-bookmark-mpv--sockets ()
+  "Return the IPC sockets where mpv players started outside Emacs may be."
+  (let ((sockets (mapcar #'media-bookmark-mpv--expand media-bookmark-mpv-sockets))
+        (config (expand-file-name "mpv.conf" (media-bookmark-mpv--config-directory))))
+    (dolist (pid (list-system-processes))
+      (let* ((attributes (process-attributes pid))
+             (args (alist-get 'args attributes)))
+        (when (and args
+                   (equal (alist-get 'comm attributes) "mpv")
+                   (string-match "--input-ipc-server[= ]\\([^ ]+\\)" args))
+          (push (media-bookmark-mpv--expand (match-string 1 args)) sockets))))
+    (when (file-readable-p config)
+      (with-temp-buffer
+        (insert-file-contents config)
+        (while (re-search-forward
+                "^[ \t]*input-ipc-server[ \t]*=[ \t]*\\(.*[^ \t\n]\\)" nil t)
+          (push (media-bookmark-mpv--expand (match-string 1)) sockets))))
+    (delete-dups (nreverse sockets))))
+
+(defun media-bookmark-mpv--query (socket properties)
+  "Return the values of PROPERTIES of the mpv at SOCKET.
+Return nil if no mpv answers there within a second."
+  (let* ((replies (make-hash-table))
+         (pending "")
+         (connection
+          (condition-case nil
+              (make-network-process
+               :name "media-bookmark-mpv-query"
+               :family 'local
+               :service socket
+               :coding 'utf-8
+               :noquery t
+               :sentinel #'ignore
+               :filter
+               (lambda (_process string)
+                 (let ((lines (split-string (concat pending string) "\n")))
+                   (setq pending (car (last lines)))
+                   (dolist (line (butlast lines))
+                     (when-let* ((reply (ignore-errors
+                                          (json-parse-string
+                                           line :object-type 'plist
+                                           :null-object nil :false-object nil)))
+                                 (id (plist-get reply :request_id)))
+                       (puthash id (plist-get reply :data) replies))))))
+            (file-error nil))))
+    (when connection
+      (unwind-protect
+          (progn
+            (cl-loop for property in properties
+                     for id from 1
+                     do (process-send-string
+                         connection
+                         (concat (json-serialize
+                                  (list :command (vector "get_property" property)
+                                        :request_id id))
+                                 "\n")))
+            (let ((deadline (+ (float-time) 1)))
+              (while (and (< (hash-table-count replies) (length properties))
+                          (< (float-time) deadline)
+                          (process-live-p connection))
+                (accept-process-output connection 0.05)))
+            (when (= (hash-table-count replies) (length properties))
+              (cl-loop for id from 1 to (length properties)
+                       collect (gethash id replies))))
+        (delete-process connection)))))
+
+(cl-defmethod media-bookmark-backend-players ((_backend (eql 'mpv)))
+  "Return the mpv players started outside Emacs that can be attached to."
+  (let ((own (cl-loop for buffer in (buffer-list)
+                      for session = (buffer-local-value
+                                     'media-bookmark--session buffer)
+                      when (and session
+                                (media-bookmark-session-live session)
+                                (eq (media-bookmark-session-backend session) 'mpv)
+                                (media-bookmark-session-data session))
+                      collect (media-bookmark-mpv--state-socket
+                               (media-bookmark-session-data session))))
+        players)
+    (dolist (socket (media-bookmark-mpv--sockets))
+      (unless (member socket own)
+        (pcase (media-bookmark-mpv--query
+                socket '("path" "working-directory" "media-title"))
+          (`(,(and (pred stringp) path) ,directory ,title)
+           (push (list :file (if (media-bookmark-url-p path)
+                                 path
+                               (expand-file-name path directory))
+                       :title title
+                       :handle socket)
+                 players)))))
+    (nreverse players)))
+
+(cl-defmethod media-bookmark-backend-attach ((_backend (eql 'mpv)) session socket)
+  "Follow the mpv at SOCKET for SESSION."
+  (let ((mpv (media-bookmark-mpv--make-state :socket socket)))
+    (setf (media-bookmark-session-data session) mpv)
+    (media-bookmark-mpv--connect session mpv 0)
+    (unless (process-live-p (media-bookmark-mpv--state-connection mpv))
+      (error "Cannot connect to mpv at %s" socket))))
+
+(cl-defmethod media-bookmark-backend-detach ((_backend (eql 'mpv)) session)
+  "Stop following the mpv of SESSION, leaving it running if not ours."
+  (let ((mpv (media-bookmark-session-data session)))
+    (if (media-bookmark-mpv--state-process mpv)
+        (cl-call-next-method)
+      (when-let* ((connection (media-bookmark-mpv--state-connection mpv)))
+        (delete-process connection))
+      (media-bookmark-stopped session))))
+
+;;;; Commands
+
 (cl-defmethod media-bookmark-backend-seek ((_backend (eql 'mpv)) session time)
   "Seek mpv playing SESSION to TIME."
   (media-bookmark-mpv--send (media-bookmark-session-data session)
@@ -165,9 +307,12 @@ mpv creates the socket shortly after it starts, so retry TRIES times."
 (cl-defmethod media-bookmark-backend-stop ((_backend (eql 'mpv)) session)
   "Quit mpv playing SESSION."
   (let ((mpv (media-bookmark-session-data session)))
-    (if (process-live-p (media-bookmark-mpv--state-connection mpv))
-        (media-bookmark-mpv--send mpv "quit")
-      (delete-process (media-bookmark-mpv--state-process mpv)))))
+    (cond
+     ((process-live-p (media-bookmark-mpv--state-connection mpv))
+      (media-bookmark-mpv--send mpv "quit"))
+     ((media-bookmark-mpv--state-process mpv)
+      (delete-process (media-bookmark-mpv--state-process mpv)))
+     (t (media-bookmark-stopped session)))))
 
 (provide 'media-bookmark-mpv)
 ;;; media-bookmark-mpv.el ends here

@@ -22,12 +22,14 @@
 ;;   M-x media-bookmark-play   play a file (with C-u, a URL) in a player
 ;;   M-x media-bookmark-set    bookmark the playing media
 ;;
-;; Playing shows a session buffer for the media.  The media is
-;; bookmarked automatically when you first pause or stop it, and
-;; playing it again resumes from there; see
-;; `media-bookmark-auto-bookmark'.  In the session buffer, m or
-;; \\[bookmark-set] (C-x r m) adds a bookmark of your own, and
-;; \\[bookmark-jump] (C-x r b) resumes any of them from any buffer.
+;;   M-x media-bookmark-attach follow an mpv started outside Emacs
+;;
+;; Playing shows a session buffer for the media.  In it, m or
+;; \\[bookmark-set] (C-x r m) bookmarks the position, and
+;; \\[bookmark-jump] (C-x r b) resumes from any buffer; so does playing
+;; the media again.  To bookmark media automatically, see
+;; `media-bookmark-auto-bookmark'.  The session buffer is shown with
+;; `pop-to-buffer', so `display-buffer-alist' decides where.
 ;;
 ;; While the media plays, the session's bookmark (the one it was set
 ;; or jumped from) follows playback: it is updated when you pause,
@@ -64,17 +66,24 @@ The bookmark is updated when the player pauses or stops, and when
 Emacs exits.  It is written to disk according to `bookmark-save-flag'."
   :type 'boolean)
 
-(defcustom media-bookmark-auto-bookmark t
-  "Non-nil means `media-bookmark-play' bookmarks media automatically.
-Playing media that has a media bookmark resumes from it.  Otherwise,
-the media is bookmarked under its title the first time its position
-is saved, as for `media-bookmark-update-bookmarks', unless that
-position is the start.  When nil, use \[bookmark-set] in the session
-buffer to bookmark media."
+(defcustom media-bookmark-auto-bookmark nil
+  "Non-nil means bookmark media without a bookmark automatically.
+Such media, played with `media-bookmark-play' or attached to with
+`media-bookmark-attach', is bookmarked under its title the first
+time its position is saved, as for `media-bookmark-update-bookmarks',
+unless that position is the start.  When nil, bookmark media with
+`media-bookmark-set'."
   :type 'boolean)
 
 (defcustom media-bookmark-rewind-when-finished t
   "Non-nil means media played to the end is bookmarked at the start."
+  :type 'boolean)
+
+(defcustom media-bookmark-kill-buffer-when-stopped t
+  "Non-nil means close a session buffer when its player stops.
+Only the buffer of the player that stopped is closed, after its
+bookmark is updated.  When nil, the buffer stays, and
+\\<media-bookmark-mode-map>\\[media-bookmark-toggle-pause] in it plays the media again."
   :type 'boolean)
 
 (defcustom media-bookmark-seek-step 10
@@ -89,9 +98,11 @@ and \\[media-bookmark-seek-backward] move."
                (:copier nil))
   "Media playing, or played, in a session buffer.
 FILE is a file name or URL.  TIME and DURATION are in seconds.  AUTO
-non-nil means bookmark the media automatically.  DATA belongs to the
+non-nil means bookmark the media automatically.  ATTACHED non-nil
+means the player was started outside Emacs.  DATA belongs to the
 backend."
-  backend file title (time 0) duration paused live buffer timer auto data)
+  backend file title (time 0) duration paused live buffer timer auto
+  attached data)
 
 (defvar-local media-bookmark--session nil
   "The `media-bookmark-session' of a session buffer.")
@@ -153,8 +164,10 @@ to START instead.  AUTO non-nil means bookmark FILE automatically."
     (media-bookmark--redisplay session)
     buffer))
 
-(defun media-bookmark--start (session start)
-  "Start SESSION's player from START seconds, or where it chooses if nil."
+(defun media-bookmark--start (session start &optional player)
+  "Start SESSION's player from START seconds, or where it chooses if nil.
+If PLAYER is non-nil, attach to that running player instead; it is
+one returned by `media-bookmark-backend-players'."
   (setf (media-bookmark-session-live session) t
         (media-bookmark-session-paused session) nil
         (media-bookmark-session-data session) nil
@@ -165,8 +178,13 @@ to START instead.  AUTO non-nil means bookmark FILE automatically."
   (condition-case err
       (progn
         (media-bookmark--load-backend (media-bookmark-session-backend session))
-        (media-bookmark-backend-play
-         (media-bookmark-session-backend session) session start))
+        (setf (media-bookmark-session-attached session) (and player t))
+        (if player
+            (media-bookmark-backend-attach
+             (media-bookmark-session-backend session) session
+             (plist-get player :handle))
+          (media-bookmark-backend-play
+           (media-bookmark-session-backend session) session start)))
     (error
      (media-bookmark-stopped session)
      (signal (car err) (cdr err)))))
@@ -233,6 +251,32 @@ Call `media-bookmark-stopped' when it has exited."
   (error "Backend `%s' does not implement `media-bookmark-backend-stop'"
          backend))
 
+(cl-defgeneric media-bookmark-backend-players (backend)
+  "Return the running players of BACKEND that a session can attach to.
+Each is a plist with :file, the media it plays, :handle, which
+`media-bookmark-backend-attach' gets, and optionally :title.
+Implementing this, `media-bookmark-backend-attach' and
+`media-bookmark-backend-detach' is optional; it lets
+`media-bookmark-attach' follow players started outside Emacs."
+  (ignore backend)
+  nil)
+
+(cl-defgeneric media-bookmark-backend-attach (backend session handle)
+  "Make BACKEND follow the running player HANDLE for SESSION.
+HANDLE is from `media-bookmark-backend-players'.  As with
+`media-bookmark-backend-play', report the player's state with
+`media-bookmark-update', and call `media-bookmark-stopped' when it
+exits or is detached."
+  (ignore session handle)
+  (error "Backend `%s' does not implement `media-bookmark-backend-attach'"
+         backend))
+
+(cl-defgeneric media-bookmark-backend-detach (backend session)
+  "Make BACKEND stop following the player of SESSION, but leave it running.
+Call `media-bookmark-stopped' when done.  Used for attached players;
+the default quits the player."
+  (media-bookmark-backend-stop backend session))
+
 (defun media-bookmark-update (session &rest props)
   "Record the state of SESSION's player.
 PROPS is a plist with any of :time, :duration and :title, and
@@ -257,6 +301,9 @@ PROPS is a plist with any of :time, :duration and :title, and
         (media-bookmark--update-bookmark session))
       (media-bookmark--redisplay session))))
 
+(defvar media-bookmark--killing nil
+  "The session buffer being killed, if any.")
+
 (defun media-bookmark-stopped (session &optional finished)
   "Record that SESSION's player has stopped and update its bookmark.
 FINISHED non-nil means the media played to the end."
@@ -268,7 +315,14 @@ FINISHED non-nil means the media played to the end."
     (when (and finished media-bookmark-rewind-when-finished)
       (setf (media-bookmark-session-time session) 0))
     (media-bookmark--update-bookmark session)
-    (media-bookmark--redisplay session)))
+    (media-bookmark--redisplay session)
+    (let ((buffer (media-bookmark-session-buffer session)))
+      (when (and media-bookmark-kill-buffer-when-stopped
+                 (buffer-live-p buffer)
+                 (not (eq buffer media-bookmark--killing)))
+        (if-let* ((window (get-buffer-window buffer t)))
+            (quit-window t window)
+          (kill-buffer buffer))))))
 
 ;;;; Bookmarks
 
@@ -421,7 +475,7 @@ one, unless the time is the start."
                                              media-bookmark-update-bookmarks)
                                         "None yet; set when paused or stopped")
                                        (t (substitute-command-keys
-                                           "None; \\[bookmark-set] sets one"))))))
+                                           "None; \\<media-bookmark-mode-map>\\[media-bookmark-set] sets one"))))))
             (insert (format "  %-9s %s\n" (car row) (cadr row))))
           (insert "\n"
                   (substitute-command-keys
@@ -438,12 +492,17 @@ quit window")
     (media-bookmark--redisplay session)))
 
 (defun media-bookmark--kill-buffer ()
-  "Update the bookmark of the current buffer's session and stop its player."
+  "Update the bookmark of the current buffer's session and stop its player.
+A player started outside Emacs is only detached from."
   (when-let* ((session media-bookmark--session)
               ((media-bookmark-session-live session)))
     (media-bookmark--update-bookmark session)
-    (media-bookmark-backend-stop (media-bookmark-session-backend session)
-                                 session)))
+    (let ((media-bookmark--killing (current-buffer)))
+      (if (media-bookmark-session-attached session)
+          (media-bookmark-backend-detach
+           (media-bookmark-session-backend session) session)
+        (media-bookmark-backend-stop (media-bookmark-session-backend session)
+                                     session)))))
 
 (defun media-bookmark-toggle-pause ()
   "Pause or resume playback.
@@ -538,17 +597,17 @@ plays, that bookmark follows playback; see
   "Play FILE, a media file or URL, and show its session buffer.
 Interactively, with a prefix argument, read a URL.
 
-If `media-bookmark-auto-bookmark' is non-nil, resume FILE from its
-media bookmark, or bookmark it automatically if it has none.  In the
-session buffer, \\[bookmark-set] bookmarks the playback position."
+If FILE has a media bookmark, resume from it.  Otherwise, it is
+bookmarked if `media-bookmark-auto-bookmark' is non-nil.  In the
+session buffer, \\<media-bookmark-mode-map>\\[media-bookmark-set] \
+bookmarks the playback position."
   (interactive
    (list (if current-prefix-arg
              (read-string "Play URL: " (thing-at-point 'url))
            (read-file-name "Play file: " nil nil t))))
   (let* ((file (media-bookmark--normalize file))
          (buffer (media-bookmark--find-buffer file))
-         (bookmark (and media-bookmark-auto-bookmark
-                        (media-bookmark--find-bookmark file))))
+         (bookmark (media-bookmark--find-bookmark file)))
     (cond
      ((and buffer (media-bookmark-session-live
                    (buffer-local-value 'media-bookmark--session buffer)))
@@ -562,6 +621,61 @@ session buffer, \\[bookmark-set] bookmarks the playback position."
       (pop-to-buffer
        (media-bookmark--play file media-bookmark-backend nil
                              media-bookmark-auto-bookmark))))))
+
+(defun media-bookmark--players ()
+  "Return the running players of all backends, as for `media-bookmark-attach'.
+Each is a plist from `media-bookmark-backend-players', with :backend."
+  (cl-loop for (backend . _) in media-bookmark-backends
+           when (ignore-errors (media-bookmark--load-backend backend) t)
+           nconc (mapcar (lambda (player)
+                           (plist-put (copy-sequence player) :backend backend))
+                         (media-bookmark-backend-players backend))))
+
+;;;###autoload
+(defun media-bookmark-attach (player)
+  "Follow PLAYER, a media player started outside Emacs.
+Interactively, read PLAYER from the running players that backends
+can attach to.  This shows a session buffer for its media, as
+`media-bookmark-play' does, without changing the playback position.
+The media's bookmark, if it has one, follows playback; if it has
+none, see `media-bookmark-auto-bookmark'.  Killing the session buffer
+stops following the player, but leaves it running."
+  (interactive
+   (let* ((players (or (media-bookmark--players)
+                       (user-error "No player to attach to")))
+          (choices (mapcar (lambda (player)
+                             (cons (format "%s (%s)"
+                                           (or (plist-get player :title)
+                                               (plist-get player :file))
+                                           (plist-get player :backend))
+                                   player))
+                           players)))
+     (list (if (cdr choices)
+               (cdr (assoc (completing-read "Attach to: " choices nil t)
+                           choices))
+             (cdar choices)))))
+  (let* ((file (media-bookmark--normalize (plist-get player :file)))
+         (buffer (media-bookmark--find-buffer file)))
+    (when (and buffer (media-bookmark-session-live
+                       (buffer-local-value 'media-bookmark--session buffer)))
+      (user-error "Already following %s" file))
+    (unless buffer
+      (setq buffer (generate-new-buffer "*media*"))
+      (with-current-buffer buffer
+        (media-bookmark-mode)))
+    (let ((session (media-bookmark--make-session
+                    :backend (plist-get player :backend) :file file
+                    :buffer buffer :title (plist-get player :title)
+                    :auto media-bookmark-auto-bookmark)))
+      (with-current-buffer buffer
+        (setq media-bookmark--session session)
+        (rename-buffer (format "*media: %s*" (media-bookmark--name session)) t)
+        (when-let* ((bookmark (media-bookmark--find-bookmark file)))
+          (setq bookmark-current-bookmark
+                (bookmark-name-from-full-record bookmark))))
+      (media-bookmark--start session nil player)
+      (media-bookmark--redisplay session)
+      (pop-to-buffer buffer))))
 
 (provide 'media-bookmark)
 ;;; media-bookmark.el ends here

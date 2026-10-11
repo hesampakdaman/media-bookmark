@@ -38,6 +38,19 @@
   (push (list 'stop) media-bookmark-test--calls)
   (media-bookmark-stopped session))
 
+(defvar media-bookmark-test--players nil
+  "Players the `test' backend can attach to.")
+
+(cl-defmethod media-bookmark-backend-players ((_ (eql 'test)))
+  media-bookmark-test--players)
+
+(cl-defmethod media-bookmark-backend-attach ((_ (eql 'test)) _session handle)
+  (push (list 'attach handle) media-bookmark-test--calls))
+
+(cl-defmethod media-bookmark-backend-detach ((_ (eql 'test)) session)
+  (push (list 'detach) media-bookmark-test--calls)
+  (media-bookmark-stopped session))
+
 (defmacro media-bookmark-test--with (&rest body)
   "Run BODY with no bookmarks, and the `test' backend by default."
   (declare (indent 0) (debug t))
@@ -53,6 +66,9 @@
           (media-bookmark-backend 'test)
           (media-bookmark-update-bookmarks t)
           (media-bookmark-rewind-when-finished t)
+          (media-bookmark-kill-buffer-when-stopped t)
+          (media-bookmark-auto-bookmark nil)
+          (media-bookmark-test--players nil)
           (media-bookmark-test--calls nil))
      (unwind-protect
          (progn ,@body)
@@ -228,6 +244,7 @@
 (ert-deftest media-bookmark-test-commands ()
   "Session buffer commands drive the backend."
   (media-bookmark-test--with
+    (setq media-bookmark-kill-buffer-when-stopped nil)
     (let ((buffer (media-bookmark--play "/m/a.ogg" 'test 100)))
       (with-current-buffer buffer
         (media-bookmark-toggle-pause)
@@ -249,9 +266,7 @@
     (let ((err (should-error (media-bookmark--play "/m/a.ogg" 'nope 0)
                              :type 'user-error)))
       (should (string-match-p "nope" (cadr err))))
-    (should-not (media-bookmark-session-live
-                 (media-bookmark-test--session
-                  (media-bookmark--find-buffer "/m/a.ogg"))))))
+    (should-not (media-bookmark--find-buffer "/m/a.ogg"))))
 
 (ert-deftest media-bookmark-test-normalize ()
   (should (equal (media-bookmark--normalize "https://e.com/v?x=1")
@@ -259,6 +274,67 @@
   (should (equal (media-bookmark--normalize "/m/../m/a.ogg") "/m/a.ogg"))
   (should (equal (media-bookmark--format-time 65) "1:05"))
   (should (equal (media-bookmark--format-time 3725.4) "1:02:05")))
+
+;;;; Closing and attaching
+
+(ert-deftest media-bookmark-test-close-stopped-only ()
+  "Only the buffer of the player that stopped is closed."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (let* ((a (progn (bookmark-jump "a" #'ignore)
+                     (media-bookmark--find-buffer "/m/a.ogg")))
+           (b (media-bookmark--play "/m/b.ogg" 'test nil))
+           (session (media-bookmark-test--session a)))
+      (switch-to-buffer a)
+      (media-bookmark-update session :time 44)
+      (media-bookmark-stopped session)
+      (should (equal (media-bookmark-test--time "a") 44))
+      (should-not (buffer-live-p a))
+      (should (buffer-live-p b))
+      (should (media-bookmark-session-live (media-bookmark-test--session b))))))
+
+(ert-deftest media-bookmark-test-keep-stopped ()
+  "With `media-bookmark-kill-buffer-when-stopped' nil, the buffer stays."
+  (media-bookmark-test--with
+    (setq media-bookmark-kill-buffer-when-stopped nil)
+    (let ((buffer (media-bookmark--play "/m/a.ogg" 'test nil)))
+      (media-bookmark-stopped (media-bookmark-test--session buffer))
+      (should (buffer-live-p buffer))
+      (should (string-match-p "Stopped" (with-current-buffer buffer
+                                          (buffer-string)))))))
+
+(ert-deftest media-bookmark-test-attach ()
+  "Attaching follows a running player, and killing detaches from it."
+  (media-bookmark-test--with
+    (media-bookmark-test--add "a" "/m/a.ogg" 30)
+    (setq media-bookmark-test--players
+          '((:file "/m/a.ogg" :title "A song" :handle h1)
+            (:file "/m/b.ogg" :handle h2)))
+    ;; Only the `test' backend, not any mpv running on this machine.
+    (setq media-bookmark-backends '((test . media-bookmark)))
+    (should (equal (media-bookmark--players)
+                   '((:file "/m/a.ogg" :title "A song" :handle h1 :backend test)
+                     (:file "/m/b.ogg" :handle h2 :backend test))))
+    (media-bookmark-attach (car (media-bookmark--players)))
+    (should (equal media-bookmark-test--calls '((attach h1))))
+    (should (equal (buffer-name) "*media: A song*"))
+    (should (equal bookmark-current-bookmark "a"))
+    (should (media-bookmark-session-attached media-bookmark--session))
+    ;; The position is the player's: no seek, and the bookmark follows.
+    (media-bookmark-update media-bookmark--session :time 500 :paused t)
+    (should (equal (media-bookmark-test--time "a") 500))
+    (should-error (media-bookmark-attach (car (media-bookmark--players)))
+                  :type 'user-error)
+    (kill-buffer (current-buffer))
+    (should (equal (car media-bookmark-test--calls) '(detach)))))
+
+(ert-deftest media-bookmark-test-attach-auto ()
+  "An attached player without a bookmark is bookmarked automatically."
+  (media-bookmark-test--with
+    (setq media-bookmark-auto-bookmark t)
+    (media-bookmark-attach '(:file "/m/b.ogg" :handle h2 :backend test))
+    (media-bookmark-update media-bookmark--session :time 12 :paused t)
+    (should (equal (media-bookmark-test--time "b.ogg") 12))))
 
 ;;;; Automatic bookmarks
 
@@ -338,20 +414,21 @@
 (ert-deftest media-bookmark-test-play-new ()
   "`media-bookmark-play' plays media without bookmarks automatically."
   (media-bookmark-test--with
+    (setq media-bookmark-auto-bookmark t)
     (media-bookmark-play "/m/a.ogg")
     (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
     (should (media-bookmark-session-auto media-bookmark--session))
     (should (string-match-p "set when paused or stopped" (buffer-string)))))
 
 (ert-deftest media-bookmark-test-play-auto-bookmark-nil ()
-  "With `media-bookmark-auto-bookmark' nil, bookmarks are left alone."
+  "By default, media is only bookmarked by hand."
   (media-bookmark-test--with
-    (let ((media-bookmark-auto-bookmark nil))
-      (media-bookmark-test--add "a" "/m/a.ogg" 30)
-      (media-bookmark-play "/m/a.ogg")
-      (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
-      (should-not (media-bookmark-session-auto media-bookmark--session))
-      (should (string-match-p "C-x r m sets one\\|bookmark-set" (buffer-string))))))
+    (media-bookmark-play "/m/a.ogg")
+    (should (equal media-bookmark-test--calls '((play "/m/a.ogg" nil))))
+    (should-not (media-bookmark-session-auto media-bookmark--session))
+    (should (string-match-p "None; m sets one" (buffer-string)))
+    (media-bookmark-update media-bookmark--session :time 40 :paused t)
+    (should-not bookmark-alist)))
 
 (ert-deftest media-bookmark-test-set-command ()
   "`media-bookmark-set' bookmarks playing media from any buffer."
@@ -462,6 +539,95 @@
        (lambda () (> (media-bookmark-session-time session) 0.5)))
       (kill-buffer buffer)
       (media-bookmark-test--wait (lambda () (not (process-live-p process)))))))
+
+(defun media-bookmark-test--external-mpv (socket file)
+  "Start an mpv outside media-bookmark on FILE, with IPC at SOCKET."
+  (let ((process (start-process "external-mpv" nil "mpv" "--no-config"
+                                "--ao=null" "--vo=null"
+                                (concat "--input-ipc-server=" socket) file)))
+    (set-process-query-on-exit-flag process nil)
+    (media-bookmark-test--wait (lambda () (file-exists-p socket)))
+    process))
+
+(ert-deftest media-bookmark-test-mpv-attach ()
+  "An mpv started outside Emacs is found, followed, and left running."
+  (media-bookmark-test--with-mpv
+    (setq media-bookmark-auto-bookmark t)
+    (let* ((socket (expand-file-name "external.sock" dir))
+           (media-bookmark-mpv-sockets nil)
+           (file (media-bookmark--normalize (media-bookmark-test--media)))
+           (process (media-bookmark-test--external-mpv socket file))
+           (player (cl-find socket (media-bookmark--players)
+                            :key (lambda (p) (plist-get p :handle))
+                            :test #'equal)))
+      (unwind-protect
+          (progn
+            (should player)
+            (should (equal (media-bookmark--normalize (plist-get player :file))
+                           file))
+            (media-bookmark-attach player)
+            (let ((buffer (current-buffer))
+                  (session media-bookmark--session))
+              (media-bookmark-test--wait
+               (lambda () (> (media-bookmark-session-time session) 0.5)))
+              ;; Our own session is not offered again.
+              (should-not (cl-find socket (media-bookmark--players)
+                                   :key (lambda (p) (plist-get p :handle))
+                                   :test #'equal))
+              (kill-buffer buffer)
+              (should (equal (media-bookmark-test--time
+                              (file-name-nondirectory file))
+                             (round (media-bookmark-session-time session))))
+              (accept-process-output nil 0.3)
+              (should (process-live-p process))
+              ;; Attach again, then quit the player itself.
+              (media-bookmark-attach
+               (cl-find socket (media-bookmark--players)
+                        :key (lambda (p) (plist-get p :handle))
+                        :test #'equal))
+              (setq buffer (current-buffer))
+              (media-bookmark-stop)
+              (media-bookmark-test--wait (lambda () (not (process-live-p process))))
+              (media-bookmark-test--wait (lambda () (not (buffer-live-p buffer))))))
+        (delete-process process)))))
+
+(ert-deftest media-bookmark-test-mpv-sockets ()
+  "Sockets are read from options and mpv.conf, as mpv expands them."
+  (let* ((home (make-temp-file "media-bookmark-test-mpv-" t))
+         (process-environment (cons (concat "MPV_HOME=" home)
+                                    process-environment))
+         (media-bookmark-mpv-sockets '("/tmp/a.sock" "~~/b.sock")))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "mpv.conf" home)
+            (insert "fs=yes\n  input-ipc-server = ~~/socket  \n"))
+          (let ((sockets (media-bookmark-mpv--sockets)))
+            (should (member "/tmp/a.sock" sockets))
+            (should (member (expand-file-name "b.sock" home) sockets))
+            (should (member (expand-file-name "socket" home) sockets))))
+      (delete-directory home t))))
+
+(ert-deftest media-bookmark-test-mpv-two-players ()
+  "Quitting one of two players closes only its session."
+  (media-bookmark-test--with-mpv
+    (let* ((file (media-bookmark--normalize (media-bookmark-test--media)))
+           (other (expand-file-name "copy.ogg" dir))
+           (_ (copy-file file other))
+           (a (media-bookmark--play file 'mpv nil t))
+           (b (media-bookmark--play other 'mpv nil t))
+           (session-a (media-bookmark-test--session a))
+           (session-b (media-bookmark-test--session b)))
+      (media-bookmark-test--wait
+       (lambda () (and (> (media-bookmark-session-time session-a) 1.2)
+                       (> (media-bookmark-session-time session-b) 1.2))))
+      (with-current-buffer a
+        (media-bookmark-stop))
+      (media-bookmark-test--wait (lambda () (not (buffer-live-p a))))
+      (accept-process-output nil 0.3)
+      (should (buffer-live-p b))
+      (should (media-bookmark-session-live session-b))
+      (should (equal (mapcar #'car bookmark-alist)
+                     (list (file-name-nondirectory file)))))))
 
 (provide 'media-bookmark-test)
 ;;; media-bookmark-test.el ends here
